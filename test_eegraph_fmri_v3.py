@@ -43,7 +43,7 @@ carpeta_test.mkdir(exist_ok=True)
 # # BLOQUE 2
 # # Crear un fMRI sintético 4D
 # # ------------------------------------------------------------
-# np.random.seed(42)
+np.random.seed(42)
 
 # datos_fmri = np.random.rand(6, 6, 6, 100).astype(np.float32)
 # affine = np.eye(4)
@@ -89,11 +89,10 @@ ruta_json.write_text(
 # BLOQUE 4
 # Atlas real AAL
 # ------------------------------------------------------------
-ruta_atlas = Path("./tmp_eegraph_fmri_test_v3/AAL.nii.gz")
-atlas_img = nib.load(str(ruta_atlas))
 
-config_atlas = AtlasConfig(atlas_name="aal")
-shape_atlas = atlas_img.shape
+
+config_atlas = AtlasConfig(atlas_name="AAL")
+
 
 # # ------------------------------------------------------------
 # # BLOQUE 2
@@ -159,7 +158,6 @@ def probar_medida(nombre_medida, threshold=0.3):
         window_size=1.0,
         connectivity=nombre_medida,
         threshold=threshold,
-        atlas_data=atlas_img,
         atlas_config=config_atlas
     )
 
@@ -197,6 +195,13 @@ def probar_medida(nombre_medida, threshold=0.3):
     print(G.metadata.keys())
 
     transform_bundle = G.metadata.get("transform_bundle")
+
+    print("\n COMPROBAMOS DATOS:")
+    print(transform_bundle.transform_metadata["num_rois"])
+    print(transform_bundle.transform_metadata["roi_ids"][:20])
+    print(transform_bundle.roi_labels[:20])
+    print("--------------------------------\n")
+
     print("\n[TEST] Ruta del JSON de centroides:")
     print(transform_bundle.centroid_json_path)
     connectivity_bundle = G.metadata.get("connectivity_bundle")
@@ -239,6 +244,8 @@ def probar_medida(nombre_medida, threshold=0.3):
     print("\n[TEST] Nodos con pos3d:")
     print(len(pos3d_attrs))
 
+    
+
     # VISUALIZAMOS el grafo para comprobar que se ha creado correctamente (opcional)
     print("\n[TEST] Visualizando el grafo...")
     G.visualize_html(grafo, carpeta_test / f"{nombre_medida}_graph_test", auto_open=True)
@@ -257,14 +264,14 @@ matriz_pearson, grafo_pearson = probar_medida("pearson", threshold=0.6)
 # BLOQUE 7
 # Probar cross_correlation
 # ------------------------------------------------------------
-matriz_cross, grafo_cross = probar_medida("cross_correlation", threshold=0.35)
+# matriz_cross, grafo_cross = probar_medida("cross_correlation", threshold=0.35)
 
 
 # ------------------------------------------------------------
 # BLOQUE 8
 # Probar corrected cross-correlation
 # ------------------------------------------------------------
-matriz_corr_cross, grafo_corr_cross = probar_medida("corrected cross-correlation", threshold=0.35)
+# matriz_corr_cross, grafo_corr_cross = probar_medida("corrected cross-correlation", threshold=0.35)
 
 
 # ------------------------------------------------------------
@@ -278,20 +285,20 @@ print("=" * 75)
 print("\n[RESUMEN] Pearson simétrica:")
 print(np.allclose(matriz_pearson, matriz_pearson.T, atol=1e-5))
 
-print("\n[RESUMEN] Cross-correlation simétrica:")
-print(np.allclose(matriz_cross, matriz_cross.T, atol=1e-5))
+# print("\n[RESUMEN] Cross-correlation simétrica:")
+# print(np.allclose(matriz_cross, matriz_cross.T, atol=1e-5))
 
-print("\n[RESUMEN] Corrected cross-correlation simétrica:")
-print(np.allclose(matriz_corr_cross, matriz_corr_cross.T, atol=1e-5))
+# print("\n[RESUMEN] Corrected cross-correlation simétrica:")
+# print(np.allclose(matriz_corr_cross, matriz_corr_cross.T, atol=1e-5))
 
 print("\n[RESUMEN] Pearson dirigido:")
 print(grafo_pearson.is_directed())
 
-print("\n[RESUMEN] Cross-correlation dirigido:")
-print(grafo_cross.is_directed())
+# print("\n[RESUMEN] Cross-correlation dirigido:")
+# print(grafo_cross.is_directed())
 
-print("\n[RESUMEN] Corrected cross-correlation dirigido:")
-print(grafo_corr_cross.is_directed())
+# print("\n[RESUMEN] Corrected cross-correlation dirigido:")
+# print(grafo_corr_cross.is_directed())
 
 print("\n" + "=" * 75)
 print("TEST V3 FINALIZADO")

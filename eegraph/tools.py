@@ -606,16 +606,16 @@ def is_fmri_graph(G):
 
 
 def get_visual_params(G):
-    if is_fmri_graph(G):
-        muchos_nodos = G.number_of_nodes() >= 40
+    muchos_nodos = G.number_of_nodes() >= 40
+    if not is_fmri_graph(G):
         return {
             "show_text": not muchos_nodos,
-            "node_size": 8 if muchos_nodos else 14,
+            "node_size": 8 if muchos_nodos else 18,
         }
-
+    
     return {
-        "show_text": True,
-        "node_size": 18,
+        "show_text": not muchos_nodos,
+        "node_size": 8 if muchos_nodos else 14,
     }
         
 def draw_graph(G):

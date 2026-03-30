@@ -69,13 +69,25 @@ def get_nifti_metadata(image) -> Dict[str, object]:
     - ndim: número de dimensiones
     - affine: matriz affine
     """
+    try:
+        import nibabel as nib
+    except ImportError as exc:
+        raise MRIInputError(
+            "No se pudo importar nibabel. Instálalo para trabajar con archivos NIfTI."
+        ) from exc
+
     shape = image.shape
     ndim = len(shape)
+    affine = image.affine
+    zooms = tuple(float(z) for z in image.header.get_zooms()[:ndim])
+    axis_codes = tuple(nib.aff2axcodes(affine))
 
     return {
         "shape": shape,
         "ndim": ndim,
-        "affine": image.affine,
+        "affine": affine,
+        "zooms": zooms,
+        "axis_codes": axis_codes,
     }
 
 

@@ -303,6 +303,8 @@ class ModelMRIData:
         self.connectivity_bundle = connectivity_modeler.run()
 
         connectivity_matrix = self.connectivity_bundle.connectivity_matrix
+        np.fill_diagonal(connectivity_matrix, 0.0) # Eliminamos autoconexiones para visualización y grafo
+
         roi_labels = self.connectivity_bundle.roi_labels
 
         # Actualizamos ch_names con las etiquetas ROI reales
