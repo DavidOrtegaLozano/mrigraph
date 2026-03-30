@@ -112,7 +112,7 @@ class Graph:
         # fMRI (nuevo comportamiento añadido)
         elif self.modality == 'fmri':
             model_data = ModelMRIData(data=self.data, ch_names=self.ch_names, connectivity=connectivity, **kwargs)
-            connectivity_matrix, G = model_data.connectivity_workflow(bands=bands, window_size=window_size, threshold=threshold, **kwargs)
+            G, connectivity_matrix = model_data.connectivity_workflow(bands=bands, window_size=window_size, threshold=threshold, **kwargs)
 
             # Tras la transformación MRI ya existen roi_labels reales. Si ModelMRIData las ha generado, las guardamos en Graph.
             if hasattr(model_data, 'ch_names') and model_data.ch_names is not None:
@@ -127,7 +127,7 @@ class Graph:
             if hasattr(model_data, 'connectivity_bundle') and model_data.connectivity_bundle is not None:
                 self.metadata["connectivity_bundle"] = model_data.connectivity_bundle
 
-            return connectivity_matrix, G
+            return G, connectivity_matrix
         
         # Si la modalidad no es ni EEG ni fMRI, lanzamos un error claro
         else:

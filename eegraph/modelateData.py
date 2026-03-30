@@ -156,7 +156,7 @@ class ModelMRIData:
 
         return config
 
-    def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None):
+    def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None, roi_centroids_3d=None):
         """
         Convierte la matriz ROI x ROI en un grafo NetworkX.
 
@@ -185,6 +185,33 @@ class ModelMRIData:
             mapping = {indice: etiqueta for indice, etiqueta in enumerate(roi_labels)}
             G = nx.relabel_nodes(G, mapping)
 
+        if roi_centroids_3d:
+            pos2d = {}
+            pos3d = {}
+
+            for node in G.nodes():
+                centroid = roi_centroids_3d.get(node)
+                if centroid is None:
+                    continue
+
+                x, y, z = centroid
+                pos3d[node] = (float(x), float(y), float(z))
+                pos2d[node] = (float(x), float(y))
+
+            if pos3d:
+                nx.set_node_attributes(G, pos3d, "pos3d")
+
+            if pos2d:
+                nx.set_node_attributes(G, pos2d, "pos")
+
+        for u, v, data in G.edges(data=True):
+            peso = float(data.get("weight", 1.0))
+
+            # El grosor debe ser siempre positivo.
+            # Usamos el valor absoluto porque en Pearson puede haber pesos negativos.
+            grosor = max(0.5, abs(peso) * 6)
+
+            data["thickness"] = grosor
         return G
 
     def connectivity_workflow(
@@ -282,12 +309,15 @@ class ModelMRIData:
         if roi_labels:
             self.ch_names = list(roi_labels)
 
+        roi_centroids_3d = getattr(self.transform_bundle, "roi_centroids_3d", None)
+
         G = self._build_graph_from_matrix(
             connectivity_matrix=connectivity_matrix,
-            roi_labels=roi_labels
+            roi_labels=roi_labels,
+            roi_centroids_3d=roi_centroids_3d,
         )
 
-        return connectivity_matrix, G
+        return G, connectivity_matrix
 
     def display_info(self, bundle=None):
         """

@@ -27,33 +27,19 @@ No implementa todavía:
 """
 
 from dataclasses import dataclass, field
+from importlib import metadata
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from .atlas import get_atlas_definition
 from .config import AtlasConfig
 from .denoise import MRIDenoiseBundle
 from .exceptions import AtlasError, TransformationError
+import json
+from pathlib import Path
 
 
 @dataclass
 class MRITransformBundle:
-    """
-    Estructura que representa la salida de la fase de transformación a ROI.
-
-    Campos principales:
-    - fmri_path: ruta del fMRI original
-    - original_metadata: metadatos heredados de entrada
-    - preprocess_metadata: metadatos heredados de preprocess
-    - denoise_metadata: metadatos heredados de denoise
-    - atlas_name: nombre lógico del atlas, si se conoce
-    - atlas_source: origen del atlas usado
-    - atlas_labels: matriz 3D de etiquetas
-    - roi_time_series: matriz 2D (num_rois, num_timepoints)
-    - roi_labels: etiquetas legibles de cada ROI
-    - auxiliary_files: archivos auxiliares heredados
-    - applied_steps: pasos realmente ejecutados
-    - transform_metadata: información útil de trazabilidad
-    """
     fmri_path: Optional[str] = None
     original_metadata: Optional[Dict[str, object]] = None
     preprocess_metadata: Optional[Dict[str, object]] = None
@@ -63,6 +49,10 @@ class MRITransformBundle:
     atlas_labels: Optional[np.ndarray] = None
     roi_time_series: Optional[np.ndarray] = None
     roi_labels: List[str] = field(default_factory=list)
+
+    roi_centroids_3d: Dict[str, Tuple[float, float, float]] = field(default_factory=dict)
+    centroid_json_path: Optional[str] = None
+
     auxiliary_files: Dict[str, object] = field(default_factory=dict)
     applied_steps: List[str] = field(default_factory=list)
     transform_metadata: Dict[str, object] = field(default_factory=dict)
@@ -109,6 +99,14 @@ class TransformMRIData:
         roi_ids = self._get_valid_roi_ids(atlas_labels)
         roi_labels = self._build_roi_labels(roi_ids)
 
+        roi_labels = self._build_roi_labels(roi_ids)
+
+        roi_centroids_3d, centroid_json_path = self._resolve_or_build_roi_centroids(
+            atlas_labels=atlas_labels,
+            roi_ids=roi_ids,
+            roi_labels=roi_labels,
+        )
+
         roi_time_series, roi_sizes = self._extract_roi_time_series(
             fmri_data=fmri_data,
             atlas_labels=atlas_labels,
@@ -140,6 +138,8 @@ class TransformMRIData:
             atlas_labels=atlas_labels,
             roi_time_series=roi_time_series,
             roi_labels=roi_labels,
+            roi_centroids_3d=roi_centroids_3d,
+            centroid_json_path=centroid_json_path,
             auxiliary_files=dict(self.denoise_bundle.auxiliary_files),
             applied_steps=applied_steps,
             transform_metadata=transform_metadata,
@@ -399,6 +399,8 @@ class TransformMRIData:
             metadata["atlas_family"] = atlas_definition.family
             metadata["atlas_description"] = atlas_definition.description
             metadata["atlas_expected_num_rois"] = atlas_definition.num_rois
+            metadata["centroid_json_path"] = str(self._get_centroid_json_path(roi_ids))
+            metadata["has_saved_centroids"] = True
 
         return metadata
 
@@ -423,6 +425,142 @@ class TransformMRIData:
             print("Pasos aplicados:")
             for step in bundle.applied_steps:
                 print(f" - {step}")
+
+
+    def _get_centroid_layout_dir(self) -> Path:
+        """
+        Carpeta donde guardamos layouts por atlas.
+        Se queda dentro de mrigraph para poder versionarlos si quieres.
+        """
+        layouts_dir = Path(__file__).resolve().parent / "atlas_centroids"
+        layouts_dir.mkdir(parents=True, exist_ok=True)
+        return layouts_dir
+
+
+    def _build_centroid_json_name(self, roi_ids: np.ndarray) -> str:
+        """
+        Genera el nombre del JSON.
+        Si hay atlas_name, usamos ese nombre.
+        Si no, usamos uno genérico con número de ROIs.
+        """
+        if self.config.atlas_name:
+            return f"{self.config.atlas_name.lower()}_centroids.json"
+
+        return f"custom_{len(roi_ids)}rois_centroids.json"
+
+
+    def _get_centroid_json_path(self, roi_ids: np.ndarray) -> Path:
+        return self._get_centroid_layout_dir() / self._build_centroid_json_name(roi_ids)
+
+
+    def _resolve_or_build_roi_centroids(
+        self,
+        atlas_labels: np.ndarray,
+        roi_ids: np.ndarray,
+        roi_labels: List[str],
+    ) -> Tuple[Dict[str, Tuple[float, float, float]], str]:
+        """
+        Intenta cargar centroides desde JSON.
+        Si no existe, los calcula y los guarda.
+        """
+        json_path = self._get_centroid_json_path(roi_ids)
+
+        if json_path.exists():
+            print("\n\nCREADOOOS\n\n")
+            centroids = self._load_roi_centroids_from_json(json_path)
+            if centroids:
+                return centroids, str(json_path)
+
+        print("\n\nNO EXISTENNN\n\n")
+        centroids = self._compute_roi_centroids(atlas_labels, roi_ids, roi_labels)
+        self._save_roi_centroids_to_json(
+            json_path=json_path,
+            roi_ids=roi_ids,
+            roi_labels=roi_labels,
+            centroids=centroids,
+            atlas_shape=atlas_labels.shape,
+            atlas_name=self.config.atlas_name,
+        )
+        return centroids, str(json_path)
+
+
+    def _compute_roi_centroids(
+        self,
+        atlas_labels: np.ndarray,
+        roi_ids: np.ndarray,
+        roi_labels: List[str],
+    ) -> Dict[str, Tuple[float, float, float]]:
+        """
+        Calcula el centroide de cada ROI en coordenadas de voxel.
+
+        Más adelante, si quieres, aquí podemos aplicar affine cuando el atlas
+        venga como imagen NIfTI en lugar de ndarray.
+        """
+        centroids: Dict[str, Tuple[float, float, float]] = {}
+
+        for roi_id, roi_label in zip(roi_ids, roi_labels):
+            coords = np.argwhere(atlas_labels == roi_id)
+
+            if coords.size == 0:
+                raise TransformationError(
+                    f"No se pudieron calcular centroides para la ROI {int(roi_id)}."
+                )
+
+            centroid = coords.mean(axis=0)
+            centroids[roi_label] = (
+                float(centroid[0]),
+                float(centroid[1]),
+                float(centroid[2]),
+            )
+
+        return centroids
+
+
+    def _save_roi_centroids_to_json(
+        self,
+        json_path: Path,
+        roi_ids: np.ndarray,
+        roi_labels: List[str],
+        centroids: Dict[str, Tuple[float, float, float]],
+        atlas_shape: Tuple[int, int, int],
+        atlas_name: Optional[str],
+    ) -> None:
+        payload = {
+            "atlas_name": atlas_name,
+            "atlas_shape": list(atlas_shape),
+            "coordinate_space": "voxel",
+            "rois": [
+                {
+                    "roi_id": int(roi_id),
+                    "roi_label": roi_label,
+                    "centroid": list(centroids[roi_label]),
+                }
+                for roi_id, roi_label in zip(roi_ids, roi_labels)
+            ],
+        }
+
+        with json_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+    def _load_roi_centroids_from_json(
+        self,
+        json_path: Path,
+    ) -> Dict[str, Tuple[float, float, float]]:
+        with json_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        centroids: Dict[str, Tuple[float, float, float]] = {}
+        for roi in payload.get("rois", []):
+            label = roi["roi_label"]
+            centroid = roi["centroid"]
+            centroids[label] = (
+                float(centroid[0]),
+                float(centroid[1]),
+                float(centroid[2]),
+            )
+
+        return centroids
 
 
 def build_synthetic_atlas(

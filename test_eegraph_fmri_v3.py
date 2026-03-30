@@ -39,18 +39,33 @@ carpeta_test = Path("tmp_eegraph_fmri_test_v3")
 carpeta_test.mkdir(exist_ok=True)
 
 
+# # ------------------------------------------------------------
+# # BLOQUE 2
+# # Crear un fMRI sintético 4D
+# # ------------------------------------------------------------
+# np.random.seed(42)
+
+# datos_fmri = np.random.rand(6, 6, 6, 100).astype(np.float32)
+# affine = np.eye(4)
+# imagen = nib.Nifti1Image(datos_fmri, affine)
+
+# ruta_fmri = carpeta_test / "fmri_fake.nii.gz"
+# nib.save(imagen, str(ruta_fmri))
+
 # ------------------------------------------------------------
 # BLOQUE 2
-# Crear un fMRI sintético 4D
+# Usar un fMRI real ya descargado
 # ------------------------------------------------------------
-np.random.seed(42)
+ruta_fmri = Path("./tmp_eegraph_fmri_test_v3/a/tfMRI_EMOTION_LR_hp0_clean_rclean_tclean.nii.gz")
+imagen = nib.load(str(ruta_fmri))
+datos_fmri = imagen.get_fdata()
 
-datos_fmri = np.random.rand(6, 6, 6, 100).astype(np.float32)
-affine = np.eye(4)
-imagen = nib.Nifti1Image(datos_fmri, affine)
+print("\n[TEST] Shape del archivo real cargado:")
+print(datos_fmri.shape)
+print("[TEST] Número de dimensiones:")
+print(datos_fmri.ndim)
 
-ruta_fmri = carpeta_test / "fmri_fake.nii.gz"
-nib.save(imagen, str(ruta_fmri))
+num_timepoints = datos_fmri.shape[3]
 
 
 # ------------------------------------------------------------
@@ -58,7 +73,7 @@ nib.save(imagen, str(ruta_fmri))
 # Crear auxiliares
 # ------------------------------------------------------------
 ruta_csv = carpeta_test / "confounds.csv"
-np.savetxt(ruta_csv, np.random.rand(100, 3), delimiter=",")
+np.savetxt(ruta_csv, np.random.rand(num_timepoints, 3), delimiter=",")
 
 ruta_tsv = carpeta_test / "events.tsv"
 np.savetxt(ruta_tsv, np.random.rand(5, 2), delimiter="\t")
@@ -72,21 +87,58 @@ ruta_json.write_text(
 
 # ------------------------------------------------------------
 # BLOQUE 4
-# Atlas sintético
+# Atlas real AAL
 # ------------------------------------------------------------
-atlas_sintetico = build_synthetic_atlas(
-    spatial_shape=datos_fmri.shape[:3],
-    num_rois=8
-)
+ruta_atlas = Path("./tmp_eegraph_fmri_test_v3/AAL.nii.gz")
+atlas_img = nib.load(str(ruta_atlas))
 
-config_atlas = AtlasConfig(atlas_name=None)
+config_atlas = AtlasConfig(atlas_name="aal")
+shape_atlas = atlas_img.shape
+
+# # ------------------------------------------------------------
+# # BLOQUE 2
+# # Crear un fMRI sintético 4D con la misma shape del atlas real
+# # ------------------------------------------------------------
+
+# np.random.seed(42)
+
+# datos_fmri = np.random.rand(shape_atlas[0], shape_atlas[1], shape_atlas[2], 100).astype(np.float32) # Esto devuelve 
+# affine = np.eye(4)
+# imagen = nib.Nifti1Image(datos_fmri, affine)
+
+# ruta_fmri = carpeta_test / "fmri_fake.nii.gz"
+# nib.save(imagen, str(ruta_fmri))
+
+from pathlib import Path
+import nibabel as nib
+
+carpeta = Path("./tmp_eegraph_fmri_test_v3/a")
+
+for ruta in carpeta.rglob("*.nii.gz"):
+    nombre = ruta.name.lower()
+
+    if any(x in nombre for x in [
+        "zstat", "sbref", "mean", "mask", "dropout",
+        "jacobian", "phase", "bias", "reference"
+    ]):
+        continue
+
+    try:
+        img = nib.load(str(ruta))
+        shape = img.shape
+        if len(shape) == 4:
+            print("VALIDO 4D:", ruta, "shape=", shape)
+        else:
+            print("NO 4D:", ruta, "shape=", shape)
+    except Exception as e:
+        print("ERROR:", ruta, e)
 
 
 # ------------------------------------------------------------
 # BLOQUE 5
 # Función auxiliar para probar una medida
 # ------------------------------------------------------------
-def probar_medida(nombre_medida):
+def probar_medida(nombre_medida, threshold=0.3):
     print("\n" + "=" * 75)
     print(f"PROBANDO MEDIDA: {nombre_medida}")
     print("=" * 75)
@@ -106,8 +158,8 @@ def probar_medida(nombre_medida):
     grafo, matriz_conectividad = G.modelate(
         window_size=1.0,
         connectivity=nombre_medida,
-        threshold=None,
-        atlas_data=atlas_sintetico,
+        threshold=threshold,
+        atlas_data=atlas_img,
         atlas_config=config_atlas
     )
 
@@ -145,7 +197,19 @@ def probar_medida(nombre_medida):
     print(G.metadata.keys())
 
     transform_bundle = G.metadata.get("transform_bundle")
+    print("\n[TEST] Ruta del JSON de centroides:")
+    print(transform_bundle.centroid_json_path)
     connectivity_bundle = G.metadata.get("connectivity_bundle")
+
+    if transform_bundle is not None:
+        print("\n[TEST] Ruta del JSON de centroides:")
+        print(transform_bundle.centroid_json_path)
+
+        print("\n[TEST] Número de centroides:")
+        print(len(transform_bundle.roi_centroids_3d))
+
+        print("\n[TEST] Primeros 5 centroides:")
+        print(list(transform_bundle.roi_centroids_3d.items())[:5])
 
     if transform_bundle is not None:
         print("\n[TEST] Shape ROI x tiempo:")
@@ -164,6 +228,21 @@ def probar_medida(nombre_medida):
         print("\n[TEST] Pasos pendientes:")
         print(connectivity_bundle.pending_steps)
 
+    import networkx as nx
+
+    pos_attrs = nx.get_node_attributes(grafo, "pos")
+    pos3d_attrs = nx.get_node_attributes(grafo, "pos3d")
+
+    print("\n[TEST] Nodos con pos:")
+    print(len(pos_attrs))
+
+    print("\n[TEST] Nodos con pos3d:")
+    print(len(pos3d_attrs))
+
+    # VISUALIZAMOS el grafo para comprobar que se ha creado correctamente (opcional)
+    print("\n[TEST] Visualizando el grafo...")
+    G.visualize_html(grafo, carpeta_test / f"{nombre_medida}_graph_test", auto_open=True)
+
     return matriz_conectividad, grafo
 
 
@@ -171,21 +250,21 @@ def probar_medida(nombre_medida):
 # BLOQUE 6
 # Probar Pearson
 # ------------------------------------------------------------
-matriz_pearson, grafo_pearson = probar_medida("pearson")
+matriz_pearson, grafo_pearson = probar_medida("pearson", threshold=0.6)
 
 
 # ------------------------------------------------------------
 # BLOQUE 7
 # Probar cross_correlation
 # ------------------------------------------------------------
-matriz_cross, grafo_cross = probar_medida("cross_correlation")
+matriz_cross, grafo_cross = probar_medida("cross_correlation", threshold=0.35)
 
 
 # ------------------------------------------------------------
 # BLOQUE 8
 # Probar corrected cross-correlation
 # ------------------------------------------------------------
-matriz_corr_cross, grafo_corr_cross = probar_medida("corrected cross-correlation")
+matriz_corr_cross, grafo_corr_cross = probar_medida("corrected cross-correlation", threshold=0.35)
 
 
 # ------------------------------------------------------------
