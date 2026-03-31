@@ -51,6 +51,8 @@ class MRITransformBundle:
     roi_time_series: Optional[np.ndarray] = None
     roi_labels: List[str] = field(default_factory=list)
 
+    centroid_coordinate_space: Optional[str] = None
+
     roi_centroids_3d: Dict[str, Tuple[float, float, float]] = field(default_factory=dict)
     centroid_json_path: Optional[str] = None
 
@@ -101,10 +103,12 @@ class TransformMRIData:
         atlas_name = self.config.atlas_name.lower() if self.config.atlas_name else None
         fmri_affine = self._get_fmri_affine()
 
-        atlas_source, atlas_labels, atlas_resampled = self._resolve_atlas(
+        atlas_source, atlas_labels, atlas_resampled, atlas_affine = self._resolve_atlas(
             spatial_shape=spatial_shape,
             fmri_affine=fmri_affine,
         )
+
+        centroid_coordinate_space = "world" if atlas_affine is not None else "voxel"
 
         roi_ids = self._get_valid_roi_ids(atlas_labels)
         roi_labels = self._build_roi_labels(roi_ids)
@@ -114,6 +118,7 @@ class TransformMRIData:
                 atlas_labels=atlas_labels,
                 roi_ids=roi_ids,
                 roi_labels=roi_labels,
+                atlas_affine=atlas_affine,
             )
             centroid_json_path = None
             centroid_cache_used = False
@@ -122,6 +127,7 @@ class TransformMRIData:
                 atlas_labels=atlas_labels,
                 roi_ids=roi_ids,
                 roi_labels=roi_labels,
+                atlas_affine=atlas_affine,
             )
             centroid_cache_used = centroid_json_path is not None
 
@@ -150,6 +156,7 @@ class TransformMRIData:
             atlas_resampled=atlas_resampled,
             centroid_json_path=centroid_json_path,
             centroid_cache_used=centroid_cache_used,
+            centroid_coordinate_space=centroid_coordinate_space,
         )
 
         bundle = MRITransformBundle(
@@ -166,6 +173,7 @@ class TransformMRIData:
             centroid_json_path=centroid_json_path,
             atlas_resampled=atlas_resampled,
             centroid_cache_used=centroid_cache_used,
+            centroid_coordinate_space=centroid_coordinate_space,
             auxiliary_files=dict(self.denoise_bundle.auxiliary_files),
             applied_steps=applied_steps,
             transform_metadata=transform_metadata,
@@ -196,7 +204,7 @@ class TransformMRIData:
                 f"{self.denoise_bundle.denoised_data.shape}."
             )
 
-    def _resolve_atlas(self, spatial_shape: Tuple[int, int, int], fmri_affine: np.ndarray) -> Tuple[str, np.ndarray, bool]:
+    def _resolve_atlas(self, spatial_shape: Tuple[int, int, int], fmri_affine: np.ndarray) -> Tuple[str, np.ndarray, bool, Optional[np.ndarray]]:
         """
         Resuelve qué atlas usar y lo adapta al espacio del fMRI si hace falta.
 
@@ -204,6 +212,7 @@ class TransformMRIData:
         - atlas_source
         - atlas_labels
         - atlas_resampled
+        atlas_affine final usada para el atlas
         """
         self._validate_atlas_name_if_provided()
 
@@ -237,7 +246,7 @@ class TransformMRIData:
         )
         if aux_atlas is not None:
             self._validate_atlas_labels(aux_atlas, spatial_shape)
-            return f"auxiliary_file:{aux_name}", aux_atlas, False
+            return f"auxiliary_file:{aux_name}", aux_atlas, False, None
 
         raise TransformationError(
             "No se ha proporcionado ningún atlas. "
@@ -419,7 +428,7 @@ class TransformMRIData:
         roi_time_series = np.vstack(roi_series_list).astype(np.float32)
         return roi_time_series, roi_sizes
 
-    def _build_transform_metadata(self, spatial_shape: Tuple[int, int, int], num_timepoints: int, atlas_labels: np.ndarray, roi_ids: np.ndarray, roi_sizes: Dict[int, int], atlas_source: str, atlas_name: Optional[str], atlas_resampled: bool, centroid_json_path: Optional[str], centroid_cache_used: bool) -> Dict[str, object]:
+    def _build_transform_metadata(self, spatial_shape: Tuple[int, int, int], num_timepoints: int, atlas_labels: np.ndarray, roi_ids: np.ndarray, roi_sizes: Dict[int, int], atlas_source: str, atlas_name: Optional[str], atlas_resampled: bool, centroid_json_path: Optional[str], centroid_cache_used: bool, centroid_coordinate_space: str,) -> Dict[str, object]:
         """
         Construye metadatos útiles de la transformación.
         """
@@ -435,6 +444,7 @@ class TransformMRIData:
             "roi_time_series_shape": (int(len(roi_ids)), int(num_timepoints)),
             "implemented_scope": ["validate_atlas_shape", "extract_mean_roi_time_series"],
             "atlas_resampled": bool(atlas_resampled),
+            "centroid_coordinate_space": centroid_coordinate_space,
             "centroid_json_path": centroid_json_path,
             "centroid_cache_used": bool(centroid_cache_used),
             "fmri_affine_available": self.denoise_bundle.original_metadata is not None
@@ -463,6 +473,7 @@ class TransformMRIData:
         print(f"fMRI original: {bundle.fmri_path}")
         print(f"Origen del atlas: {bundle.atlas_source}")
         print(f"Nombre del atlas: {bundle.atlas_name}")
+        print(f"Espacio de centroides: {bundle.transform_metadata['centroid_coordinate_space']}")
 
         if bundle.transform_metadata:
             print(f"Shape del atlas: {bundle.transform_metadata['atlas_shape']}")
@@ -503,24 +514,30 @@ class TransformMRIData:
     def _get_centroid_json_path(self, roi_ids: np.ndarray) -> Path:
         return self._get_centroid_layout_dir() / self._build_centroid_json_name(roi_ids)
 
-    def _resolve_or_build_roi_centroids(
-        self,
-        atlas_labels: np.ndarray,
-        roi_ids: np.ndarray,
-        roi_labels: List[str],
-    ) -> Tuple[Dict[str, Tuple[float, float, float]], str]:
+    def _resolve_or_build_roi_centroids(self, atlas_labels: np.ndarray, roi_ids: np.ndarray, roi_labels: List[str], atlas_affine: Optional[np.ndarray]) -> Tuple[Dict[str, Tuple[float, float, float]], str]:
         """
         Intenta cargar centroides desde JSON.
-        Si no existe, los calcula y los guarda.
+        Si no existe, o si el JSON no coincide con las labels/coordenadas esperadas, los calcula y los guarda de nuevo.
         """
         json_path = self._get_centroid_json_path(roi_ids)
+        expected_coordinate_space = "world" if atlas_affine is not None else "voxel"
 
         if json_path.exists():
-            centroids = self._load_roi_centroids_from_json(json_path)
+            centroids = self._load_roi_centroids_from_json(
+                json_path=json_path,
+                expected_roi_labels=roi_labels,
+                expected_coordinate_space=expected_coordinate_space,
+            )
             if centroids:
                 return centroids, str(json_path)
 
-        centroids = self._compute_roi_centroids(atlas_labels, roi_ids, roi_labels)
+        centroids = self._compute_roi_centroids(
+            atlas_labels=atlas_labels,
+            roi_ids=roi_ids,
+            roi_labels=roi_labels,
+            atlas_affine=atlas_affine,
+        )
+
         self._save_roi_centroids_to_json(
             json_path=json_path,
             roi_ids=roi_ids,
@@ -528,32 +545,36 @@ class TransformMRIData:
             centroids=centroids,
             atlas_shape=atlas_labels.shape,
             atlas_name=self.config.atlas_name,
+            coordinate_space=expected_coordinate_space,
         )
+
         return centroids, str(json_path)
 
-    def _compute_roi_centroids(
-        self,
-        atlas_labels: np.ndarray,
-        roi_ids: np.ndarray,
-        roi_labels: List[str],
-    ) -> Dict[str, Tuple[float, float, float]]:
+    def _compute_roi_centroids(self, atlas_labels: np.ndarray, roi_ids: np.ndarray, roi_labels: List[str], atlas_affine: Optional[np.ndarray] = None) -> Dict[str, Tuple[float, float, float]]:
         """
-        Calcula el centroide de cada ROI en coordenadas de voxel.
+        Calcula el centroide de cada ROI.
 
-        Más adelante, si quieres, aquí podemos aplicar affine cuando el atlas
-        venga como imagen NIfTI en lugar de ndarray.
+        - Si hay affine disponible, devuelve coordenadas mundo (world).
+        - Si no la hay, cae a coordenadas voxel.
         """
         centroids: Dict[str, Tuple[float, float, float]] = {}
 
         for roi_id, roi_label in zip(roi_ids, roi_labels):
             coords = np.argwhere(atlas_labels == roi_id)
-
             if coords.size == 0:
                 raise TransformationError(
                     f"No se pudieron calcular centroides para la ROI {int(roi_id)}."
                 )
 
-            centroid = coords.mean(axis=0)
+            voxel_centroid = coords.mean(axis=0).astype(np.float64)
+
+            if atlas_affine is not None:
+                voxel_h = np.append(voxel_centroid, 1.0)
+                world_centroid = np.asarray(atlas_affine, dtype=np.float64) @ voxel_h
+                centroid = world_centroid[:3]
+            else:
+                centroid = voxel_centroid
+
             centroids[roi_label] = (
                 float(centroid[0]),
                 float(centroid[1]),
@@ -562,19 +583,11 @@ class TransformMRIData:
 
         return centroids
 
-    def _save_roi_centroids_to_json(
-        self,
-        json_path: Path,
-        roi_ids: np.ndarray,
-        roi_labels: List[str],
-        centroids: Dict[str, Tuple[float, float, float]],
-        atlas_shape: Tuple[int, int, int],
-        atlas_name: Optional[str],
-    ) -> None:
+    def _save_roi_centroids_to_json(self, json_path: Path, roi_ids: np.ndarray, roi_labels: List[str], centroids: Dict[str, Tuple[float, float, float]], atlas_shape: Tuple[int, int, int], atlas_name: Optional[str], coordinate_space: str) -> None:
         payload = {
             "atlas_name": atlas_name,
             "atlas_shape": list(atlas_shape),
-            "coordinate_space": "voxel",
+            "coordinate_space": coordinate_space,
             "rois": [
                 {
                     "roi_id": int(roi_id),
@@ -588,15 +601,25 @@ class TransformMRIData:
         with json_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    def _load_roi_centroids_from_json(
-        self,
-        json_path: Path,
-    ) -> Dict[str, Tuple[float, float, float]]:
+    def _load_roi_centroids_from_json(self, json_path: Path, expected_roi_labels: Optional[List[str]] = None, expected_coordinate_space: Optional[str] = None) -> Dict[str, Tuple[float, float, float]]:
         with json_path.open("r", encoding="utf-8") as f:
             payload = json.load(f)
 
+        payload_coordinate_space = payload.get("coordinate_space")
+        if (
+            expected_coordinate_space is not None
+            and payload_coordinate_space != expected_coordinate_space
+        ):
+            return {}
+
+        rois = payload.get("rois", [])
+        payload_labels = [roi.get("roi_label") for roi in rois]
+
+        if expected_roi_labels is not None and payload_labels != list(expected_roi_labels):
+            return {}
+
         centroids: Dict[str, Tuple[float, float, float]] = {}
-        for roi in payload.get("rois", []):
+        for roi in rois:
             label = roi["roi_label"]
             centroid = roi["centroid"]
             centroids[label] = (
@@ -663,9 +686,15 @@ class TransformMRIData:
 
         return resampled_img
 
-    def _prepare_atlas_for_fmri_space(self, atlas_data: object, spatial_shape: Tuple[int, int, int], fmri_affine: np.ndarray, atlas_source: str) -> Tuple[str, np.ndarray, bool]:
+    def _prepare_atlas_for_fmri_space(self, atlas_data: object, spatial_shape: Tuple[int, int, int], fmri_affine: np.ndarray, atlas_source: str) -> Tuple[str, np.ndarray, bool, Optional[np.ndarray]]:
         """
         Prepara el atlas para que quede en el mismo espacio/grid que el fMRI.
+
+        Devuelve:
+        - atlas_source final
+        - atlas_labels
+        - atlas_resampled
+        - atlas_affine final usada para centroides
         """
         # Caso 1: imagen tipo nibabel -> podemos comparar affine y resamplear
         if hasattr(atlas_data, "get_fdata") and hasattr(atlas_data, "affine"):
@@ -674,7 +703,7 @@ class TransformMRIData:
             if self._atlas_matches_fmri_space(atlas_img, spatial_shape, fmri_affine):
                 atlas_labels = self._coerce_atlas_to_array(atlas_img)
                 self._validate_atlas_labels(atlas_labels, spatial_shape)
-                return atlas_source, atlas_labels, False
+                return atlas_source, atlas_labels, False, np.asarray(atlas_img.affine, dtype=float)
 
             resampled_img = self._resample_atlas_to_fmri_space(
                 atlas_img=atlas_img,
@@ -683,12 +712,17 @@ class TransformMRIData:
             )
             atlas_labels = self._coerce_atlas_to_array(resampled_img)
             self._validate_atlas_labels(atlas_labels, spatial_shape)
-            return f"{atlas_source}|resampled_to_fmri", atlas_labels, True
+            return (
+                f"{atlas_source}|resampled_to_fmri",
+                atlas_labels,
+                True,
+                np.asarray(resampled_img.affine, dtype=float),
+            )
 
         # Caso 2: ndarray 3D -> no podemos resamplear porque no hay affine
         atlas_labels = self._coerce_atlas_to_array(atlas_data)
         self._validate_atlas_labels(atlas_labels, spatial_shape)
-        return atlas_source, atlas_labels, False
+        return atlas_source, atlas_labels, False, None
     
     def _load_atlas_from_config_if_available(self):
         """

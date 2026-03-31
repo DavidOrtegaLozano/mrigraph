@@ -156,24 +156,27 @@ class ModelMRIData:
 
         return config
 
-    def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None, roi_centroids_3d=None):
+    def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None, roi_centroids_3d=None, centroid_coordinate_space="world", projection="coronal"):
         """
         Convierte la matriz ROI x ROI en un grafo NetworkX.
 
-        Esto permite devolver una salida parecida a la del flujo EEG:
-        - connectivity_matrix
-        - G
+        Para fMRI:
+        - guardamos pos3d completa,
+        - proyectamos a 2D con una vista anatómica fija,
+        - y guardamos una profundidad separada para colorear los nodos.
+
+        Proyección elegida:
+        - coronal: X horizontal, Z vertical, Y = profundidad
         """
         import networkx as nx
         import numpy as np
 
         matrix = np.array(connectivity_matrix, copy=True)
-
         if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
             raise ValueError(
                 "La matriz de conectividad debe ser cuadrada para construir el grafo."
             )
-        
+
         es_simetrica = np.allclose(matrix, matrix.T, atol=1e-5)
 
         if es_simetrica:
@@ -185,9 +188,15 @@ class ModelMRIData:
             mapping = {indice: etiqueta for indice, etiqueta in enumerate(roi_labels)}
             G = nx.relabel_nodes(G, mapping)
 
+        # Marcamos explícitamente la modalidad para que tools.py no dependa de "ROI_"
+        G.graph["modality"] = "fmri"
+        G.graph["coordinate_space"] = centroid_coordinate_space
+        G.graph["projection"] = projection
+
         if roi_centroids_3d:
             pos2d = {}
             pos3d = {}
+            depth = {}
 
             for node in G.nodes():
                 centroid = roi_centroids_3d.get(node)
@@ -195,36 +204,53 @@ class ModelMRIData:
                     continue
 
                 x, y, z = centroid
-                pos3d[node] = (float(x), float(y), float(z))
-                pos2d[node] = (float(x), float(y))
+                x = float(x)
+                y = float(y)
+                z = float(z)
+
+                pos3d[node] = (x, y, z)
+
+                if projection == "coronal":
+                    # Vista coronal:
+                    # - horizontal: izquierda <-> derecha  -> X
+                    # - vertical:   inferior <-> superior -> Z
+                    # - profundidad: posterior <-> anterior -> Y
+                    # Es como si el sujeto mirase a la 
+                    pos2d[node] = (x, z)
+                    depth[node] = y
+                    G.graph["depth_axis"] = "y"
+                    G.graph["depth_legend"] = "Profundidad Y (posterior ↔ anterior)"
+
+                elif projection == "axial":
+                    pos2d[node] = (x, y)
+                    depth[node] = z
+                    G.graph["depth_axis"] = "z"
+                    G.graph["depth_legend"] = "Profundidad Z (inferior ↔ superior)"
+
+                elif projection == "sagittal":
+                    pos2d[node] = (y, z)
+                    depth[node] = x
+                    G.graph["depth_axis"] = "x"
+                    G.graph["depth_legend"] = "Profundidad X (izquierda ↔ derecha)"
+
+                else:
+                    raise ValueError(f"Proyección MRI no soportada: {projection}")
 
             if pos3d:
                 nx.set_node_attributes(G, pos3d, "pos3d")
-
             if pos2d:
                 nx.set_node_attributes(G, pos2d, "pos")
+            if depth:
+                nx.set_node_attributes(G, depth, "depth")
 
         for u, v, data in G.edges(data=True):
             peso = float(data.get("weight", 1.0))
-
-            # El grosor debe ser siempre positivo.
-            # Usamos el valor absoluto porque en Pearson puede haber pesos negativos.
             grosor = max(0.5, abs(peso) * 6)
-
             data["thickness"] = grosor
+
         return G
 
-    def connectivity_workflow(
-        self,
-        bands=[None],
-        window_size=1.0,
-        threshold=None,
-        atlas_data=None,
-        atlas_config=None,
-        preprocess_config=None,
-        denoise_config=None,
-        connectivity_config=None,
-    ):
+    def connectivity_workflow(self, bands=[None], window_size=1.0, threshold=None, atlas_data=None, atlas_config=None, preprocess_config=None, denoise_config=None, connectivity_config=None):
         """
         Ejecuta el workflow completo MRI.
 
@@ -313,10 +339,25 @@ class ModelMRIData:
 
         roi_centroids_3d = getattr(self.transform_bundle, "roi_centroids_3d", None)
 
+        centroid_coordinate_space = getattr(
+            self.transform_bundle,
+            "centroid_coordinate_space",
+            None
+        )
+
+        if centroid_coordinate_space is None:
+            centroid_coordinate_space = self.transform_bundle.transform_metadata.get(
+                "centroid_coordinate_space",
+                "world"
+            )
+
         G = self._build_graph_from_matrix(
             connectivity_matrix=connectivity_matrix,
             roi_labels=roi_labels,
             roi_centroids_3d=roi_centroids_3d,
+            centroid_coordinate_space=centroid_coordinate_space,
+            #projection="axial",
+            projection="coronal"
         )
 
         return G, connectivity_matrix

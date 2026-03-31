@@ -53,13 +53,6 @@ SUPPORTED_ATLASES: Dict[str, AtlasDefinition] = {
         modality="fMRI",
         description="Atlas anatómico clásico, útil como opción de granularidad media."
     ),
-    "bna": AtlasDefinition(
-        name="bna",
-        family="Brainnetome",
-        num_rois=246,
-        modality="fMRI",
-        description="Atlas de granularidad media-alta, orientado a conectividad."
-    ),
     "schaefer_100": AtlasDefinition(
         name="schaefer_100",
         family="Schaefer",
@@ -74,10 +67,10 @@ SUPPORTED_ATLASES: Dict[str, AtlasDefinition] = {
         modality="fMRI",
         description="Versión funcional de Schaefer con 200 ROIs."
     ),
-    "schaefer_1000": AtlasDefinition(
-        name="schaefer_1000",
+    "schaefer_400": AtlasDefinition(
+        name="schaefer_400",
         family="Schaefer",
-        num_rois=1000,
+        num_rois=400,
         modality="fMRI",
         description="Versión de alta granularidad de Schaefer."
     ),
@@ -207,10 +200,9 @@ ATLAS_ROI_NAME_MAPS: Dict[str, Dict[int, str]] = {
 
 DEFAULT_ATLAS_FILENAMES: Dict[str, str] = {
     "aal": "aal.nii.gz",
-    "bna": "bna.nii.gz",
     "schaefer_100": "schaefer_100.nii.gz",
     "schaefer_200": "schaefer_200.nii.gz",
-    "schaefer_1000": "schaefer_1000.nii.gz",
+    "schaefer_400": "schaefer_400.nii.gz",
 }
 
 def get_default_atlas_dir() -> Path:

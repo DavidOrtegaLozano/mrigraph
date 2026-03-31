@@ -91,7 +91,7 @@ ruta_json.write_text(
 # ------------------------------------------------------------
 
 
-config_atlas = AtlasConfig(atlas_name="AAL")
+config_atlas = AtlasConfig(atlas_name="schaefer_100")
 
 
 # # ------------------------------------------------------------
@@ -147,11 +147,11 @@ def probar_medida(nombre_medida, threshold=0.3):
     G.load_data(
         path=str(ruta_fmri),
         modality="fmri",
-        auxiliary_paths=[
-            str(ruta_csv),
-            str(ruta_tsv),
-            str(ruta_json),
-        ]
+        # auxiliary_paths=[
+        #     str(ruta_csv),
+        #     str(ruta_tsv),
+        #     str(ruta_json),
+        # ]
     )
 
     grafo, matriz_conectividad = G.modelate(

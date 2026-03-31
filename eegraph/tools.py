@@ -598,11 +598,15 @@ def set_generic_node_positions(G):
     nx.set_node_attributes(G, pos, 'pos')
 
 def is_fmri_graph(G):
+    if G.graph.get("modality") == "fmri":
+        return True
+
     nodos = list(G.nodes())
     if not nodos:
         return False
-    roi_nodes = sum(str(n).startswith("ROI_") for n in nodos)
-    return roi_nodes > max(1, len(nodos) // 2)
+
+    pos3d = nx.get_node_attributes(G, "pos3d")
+    return len(pos3d) == len(nodos)
 
 
 def get_visual_params(G):
@@ -761,19 +765,19 @@ def draw_graph(G):
     )
     
     fig.update_layout(updatemenus=[dict(
-                                        type = "buttons",
-                                        direction = "left",
-                                        buttons=list([
-                                            dict(
-                                                args=[{"visible": visibility}],
-                                                label="Hide edge markers",
-                                                method="restyle"
-                                            ),
-                                            dict(
-                                                args=[{"visible":[1]}],
-                                                label="Show edge markers",
-                                                method="restyle"
-                                            )]))])
+        type = "buttons",
+        direction = "left",
+        buttons=list([
+            dict(
+                args=[{"visible": visibility}],
+                label="Hide edge markers",
+                method="restyle"
+            ),
+            dict(
+                args=[{"visible":[1]}],
+                label="Show edge markers",
+                method="restyle"
+            )]))])
     
     if directed:
         edges_control = []
@@ -797,54 +801,61 @@ def draw_graph(G):
     
     
 def get_edge_trace(G):
-    etext = [f'weight: {"{:.2f}".format(w)}' for w in list(nx.get_edge_attributes(G, 'weight').values())]
-    xtext, ytext, edges_control = [], [], []
-    
-    edges = G.edges()
-    weights = [G[u][v]['weight'] for u,v in edges]
-    thickness = [
-        G[u][v].get("thickness", max(0.5, abs(float(G[u][v].get("weight", 1.0))) * 6))
-        for u, v in edges
+    etext = [
+        f'weight: {"{:.2f}".format(w)}'
+        for w in list(nx.get_edge_attributes(G, 'weight').values())
     ]
-    
+
+    xtext, ytext, edges_control = [], [], []
+    edges = list(G.edges())
+
     edge_traces = {}
-    
-    for i, edge in enumerate (G.edges()):  
+
+    for i, edge in enumerate(edges):
         edge_x = []
         edge_y = []
-        
+
         x0, y0 = G.nodes[edge[0]]['pos']
         x1, y1 = G.nodes[edge[1]]['pos']
-        
-        #If there is another edge between the same nodes in the opposite direction
+
+        # Si existe otra arista entre los mismos nodos en dirección opuesta
         if edge in edges_control:
-            x0= x0 - 0.05
-            y0= y0 + 0.05
-            x1= x1 - 0.05
-            y1= y1 + 0.05
+            x0 = x0 - 0.05
+            y0 = y0 + 0.05
+            x1 = x1 - 0.05
+            y1 = y1 + 0.05
 
-        xtext.append((x0+x1)/2)
-        ytext.append((y0+y1)/2)
-        edge_x.append(x0)
-        edge_x.append(x1)
-        edge_x.append(None)
-        edge_y.append(y0)
-        edge_y.append(y1)
-        edge_y.append(None)
-        width = thickness[i]
+        xtext.append((x0 + x1) / 2)
+        ytext.append((y0 + y1) / 2)
 
-        #We add the edge in the opposite direction to control edges between the same nodes
-        edges_control.append((edge[1],edge[0]))
-        
-        edge_traces['trace_' + str(i)] = go.Scatter(
-        x=edge_x, y=edge_y,
-        line=dict(width=width, color='#000'),
-        mode='lines',
-        hoverinfo='skip',
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+        # Grosor base de la arista
+        base_width = G[edge[0]][edge[1]].get(
+            "thickness",
+            max(0.5, abs(float(G[edge[0]][edge[1]].get("weight", 1.0))) * 6)
         )
-    
+
+        # Lo comprimimos mucho para que no domine visualmente
+        width = min(1.8, max(0.35, base_width * 0.28))
+
+        # Añadimos la arista inversa para controlar duplicadas en grafos dirigidos
+        edges_control.append((edge[1], edge[0]))
+
+        edge_traces['trace_' + str(i)] = go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            line=dict(
+                width=width,
+                color='rgba(60, 60, 60, 0.18)'
+            ),
+            mode='lines',
+            hoverinfo='skip',
+        )
+
     edge_trace = list(edge_traces.values())
-    
+
     eweights_trace_hover = go.Scatter(x=xtext,y= ytext, mode='markers',
                               marker_size=0.5,
                               text= etext,
@@ -852,30 +863,63 @@ def get_edge_trace(G):
                               hovertemplate='%{text}<extra></extra>')
     
     eweights_trace_markers = go.Scatter(x=xtext,y= ytext, mode='markers',
-                                marker = dict( size=8, color='black'),
+                                marker = dict( size=8, color='rgba(80,80,80,0.35)'),
                                 hoverinfo='none',
                                 visible=False)
-                        
-    
+
     return edge_trace, eweights_trace_hover, eweights_trace_markers
 
 
 def get_node_trace(G):
     node_x = []
     node_y = []
+    node_hover = []
+    depth_values = []
+
+    fmri_graph = is_fmri_graph(G)
+
     for node in G.nodes():
         x, y = G.nodes[node]['pos']
         node_x.append(x)
         node_y.append(y)
+
+        hover_lines = [str(node)]
     
+        if 'pos3d' in G.nodes[node]:
+            x3, y3, z3 = G.nodes[node]['pos3d']
+            # hover_lines.append(f"x = {x3:.2f}")
+            # hover_lines.append(f"y = {y3:.2f}")
+            # hover_lines.append(f"z = {z3:.2f}")
+
+        if fmri_graph and 'depth' in G.nodes[node]:
+            depth_value = float(G.nodes[node]['depth'])
+            depth_values.append(depth_value)
+            hover_lines.append(f"profundidad = {depth_value:.2f}")
+
+        node_hover.append("<br>".join(hover_lines))
+
     show_text = G.graph.get("show_text", True)
     node_size = G.graph.get("node_size", 18)
-
     node_text = list(G.nodes()) if show_text else None
-    node_hover = [str(n) for n in G.nodes()]
     node_mode = "markers+text" if show_text else "markers"
 
-    labels = [str(node) for node in G.nodes()]
+    marker_config = dict(
+        size=node_size,
+        line_width=1,
+    )
+
+    if fmri_graph and len(depth_values) == len(node_x):
+        marker_config.update(
+            color=depth_values,
+            colorscale="RdBu",
+            cmid=0,
+            showscale=True,
+            colorbar=dict(
+                title=G.graph.get("depth_legend", "Profundidad"),
+                thickness=18,
+            ),
+        )
+
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
@@ -884,12 +928,7 @@ def get_node_trace(G):
         hovertext=node_hover,
         hoverinfo="text",
         textposition="top center",
-        marker=dict(
-            size=node_size,
-            line_width=1
-        )
+        marker=marker_config,
     )
 
     return node_trace
-
-    
