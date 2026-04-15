@@ -1,26 +1,3 @@
-"""
-Paso 7 del pipeline MRI.
-Archivo: denoise.py
-
-Qué hace este archivo:
-- Recibe la salida del preprocesado.
-- Trabaja sobre la representación voxel x tiempo.
-- Aplica un denoising básico y honesto:
-  - regresión de confounds si existen,
-  - reconstrucción del volumen 4D denoised.
-
-Importante:
-Este archivo NO implementa todavía denoising neuroimagen completo.
-Por tanto, de momento NO realiza realmente:
-- scrubbing basado en FD/DVARS,
-- filtrado band-pass dependiente de TR,
-- ICA-based denoising,
-- estrategias avanzadas tipo aCompCor/tCompCor completas.
-
-La idea aquí es dejar una fase funcional, bien estructurada
-y coherente con el alcance actual del tutor: llegar hasta conectividad.
-"""
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 import numpy as np

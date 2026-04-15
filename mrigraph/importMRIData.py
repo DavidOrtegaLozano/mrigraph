@@ -1,25 +1,3 @@
-"""
-Paso 5 del pipeline MRI.
-Archivo: importMRIData.py
-
-Qué hace este archivo:
-- Es el punto de entrada de datos para MRIGraph.
-- Detecta qué tipo de archivo entra.
-- Valida extensiones y combinaciones.
-- Carga fMRI NIfTI y también archivos auxiliares o derivados.
-
-Importante:
-Este archivo NO hace todavía:
-- preprocesado,
-- denoising,
-- atlas,
-- ROI,
-- conectividad.
-
-Su misión es únicamente dejar los datos bien cargados y organizados
-para que el siguiente paso del pipeline los pueda usar.
-"""
-
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -112,10 +90,6 @@ class InputMRIData:
     def _load_auxiliary_files(self) -> Dict[str, object]:
         """
         Carga los archivos auxiliares o derivados.
-
-        La clave del diccionario será el nombre del archivo.
-        Más adelante podremos sofisticar esto y clasificar mejor
-        qué tipo de auxiliar es cada uno.
         """
         loaded_aux = {}
 
@@ -148,8 +122,7 @@ class InputMRIData:
         """
         Muestra por pantalla información resumida sobre la entrada cargada.
 
-        Esto es útil para depuración y para entender rápidamente
-        qué ha detectado la librería.
+        Esto es útil para depuración y para entender rápidamente qué ha detectado la librería.
         """
         print("\n[MRIGraph] Datos cargados correctamente")
         print(f"fMRI principal: {bundle.fmri_path}")

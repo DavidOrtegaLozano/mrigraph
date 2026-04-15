@@ -1,19 +1,3 @@
-"""
-Paso 10 del pipeline MRI.
-Archivo: strategy.py
-
-Qué hace este archivo:
-- Define la capa de estrategia para las medidas de conectividad.
-- Se encarga de seleccionar qué medida usar.
-- Delega el cálculo real en tools.py.
-
-Por qué está así:
-- queremos mantener una arquitectura modular,
-- queremos que añadir nuevas medidas más adelante sea sencillo,
-- y queremos mantener una filosofía parecida a EEGraph:
-  registro de medidas + selección por nombre + cálculo desacoplado.
-"""
-
 from abc import ABC, abstractmethod
 import numpy as np
 from .tools import compute_pearson_correlation,compute_cross_correlation,compute_corrected_cross_correlation,validate_connectivity_method

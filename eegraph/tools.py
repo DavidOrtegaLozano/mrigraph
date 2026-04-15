@@ -564,7 +564,6 @@ def set_generic_node_positions(G):
     Esta función está pensada como fallback para grafos cuyos nodos no sean electrodos EEG reconocidos, por ejemplo ROIs de MRI.
 
     Importante:
-    - no modifica la lógica EEG existente,
     - solo se usará cuando no haya ningún nodo reconocible del mapa EEG.
     """
     G_layout = G.copy()

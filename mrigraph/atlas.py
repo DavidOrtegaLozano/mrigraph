@@ -1,22 +1,3 @@
-"""
-Paso 3 del pipeline MRI.
-Archivo: atlas.py
-
-Qué hace este archivo:
-- Define el registro de atlas soportados por MRIGraph.
-- Guarda información básica de cada atlas:
-  - nombre,
-  - número aproximado de nodos,
-  - tipo,
-  - descripción breve.
-
-Este archivo no aplica todavía el atlas sobre el fMRI.
-Su objetivo ahora es:
-1. dejar claro qué atlas vamos a soportar,
-2. centralizar esa información,
-3. facilitar validaciones y decisiones posteriores.
-"""
-
 from dataclasses import dataclass
 from typing import Dict, List
 from .exceptions import AtlasError

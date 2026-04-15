@@ -71,7 +71,7 @@ class InputfMRIData:
     Importante:
     - NO sustituye a InputData.
     - NO rompe el flujo EEG.
-    - Solo se usará cuando Graph trabaje con modality='fmri'.
+    - Solo se usará cuando Graph trabaje con modality=fmri.
     """
 
     def __init__(self, path, auxiliary_paths=None, config=None):

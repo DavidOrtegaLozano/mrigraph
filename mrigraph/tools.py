@@ -1,28 +1,3 @@
-"""
-Paso 9 del pipeline MRI.
-Archivo: tools.py
-
-Qué hace este archivo:
-- Centraliza utilidades comunes de MRIGraph.
-- Define el registro de medidas de conectividad soportadas.
-- Implementa la lógica numérica de las medidas que realmente usamos.
-
-Importante:
-La idea de este archivo sigue la filosofía de EEGraph:
-- mantener un registro de medidas soportadas,
-- separar la lógica de cálculo de la capa que orquesta el pipeline.
-
-En esta versión:
-- pearson_correlation
-- cross_correlation
-- corr_cross_correlation
-
-Nota:
-Las implementaciones de cross_correlation y corr_cross_correlation
-se han adaptado a MRI reutilizando la lógica real de EEGraph sobre
-señales 1D, pero aplicada ahora a series ROI x tiempo.
-"""
-
 from typing import Dict, List
 import numpy as np
 from scipy import signal

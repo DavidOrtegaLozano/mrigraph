@@ -1,21 +1,3 @@
-"""
-Paso 1 del pipeline MRI.
-Archivo: exceptions.py
-
-Qué hace este archivo:
-- Define las excepciones propias de MRIGraph.
-- Sirve para lanzar errores claros y controlados cuando:
-  - el formato no es válido,
-  - falta un archivo obligatorio,
-  - el atlas no está soportado,
-  - la matriz no tiene la forma esperada,
-  - etc.
-
-La idea es no lanzar errores genéricos poco útiles, sino mensajes
-claros que faciliten depurar y usar la librería.
-"""
-
-
 class MRIGraphError(Exception):
     """
     Excepción base de la librería MRIGraph.

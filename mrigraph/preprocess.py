@@ -1,29 +1,3 @@
-"""
-Paso 6 del pipeline MRI.
-Archivo: preprocess.py
-
-Qué hace este archivo:
-- Recibe los datos cargados desde InputMRIData.
-- Extrae el contenido numérico del NIfTI a un array de NumPy.
-- Valida que la forma siga siendo compatible con fMRI 4D.
-- Aplica un preprocesado básico y honesto:
-  - limpieza de valores no finitos (NaN / inf),
-  - normalización global opcional,
-  - preparación de una matriz voxel x tiempo.
-
-Importante:
-Este archivo NO implementa todavía preprocesado neuroimagen avanzado.
-Por tanto, de momento NO realiza realmente:
-- motion correction,
-- slice timing correction,
-- outlier detection clínica,
-- smoothing espacial real.
-
-Esas opciones existen ya en la configuración para dejar preparada
-la arquitectura, pero aquí solo registramos que están pendientes
-de implementación si se solicitan.
-"""
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import numpy as np
@@ -208,10 +182,6 @@ class PreprocessMRIData:
         Estrategia:
         - media global = 0
         - desviación típica global = 1
-
-        Nota:
-        Esto es una normalización básica de ingeniería para dejar el pipeline
-        consistente. No pretende sustituir un preprocesado científico completo.
         """
         mean_value = float(np.mean(fmri_data))
         std_value = float(np.std(fmri_data))
@@ -240,9 +210,7 @@ class PreprocessMRIData:
     def _collect_pending_steps(self) -> List[str]:
         """
         Recoge los pasos marcados en configuración pero aún no implementados.
-
-        Esto evita dar a entender que la librería ya hace operaciones
-        neuroimagen avanzadas cuando todavía no es así.
+        (para debug)
         """
         pending_steps = []
 

@@ -1,28 +1,3 @@
-"""
-Paso 11 del pipeline MRI.
-Archivo: modelateData.py
-
-Qué hace este archivo:
-- Recibe la salida de la transformación a ROI.
-- Selecciona la estrategia de conectividad.
-- Calcula la matriz de conectividad entre regiones.
-- Aplica opcionalmente un umbral.
-- Empaqueta el resultado en una estructura reutilizable.
-
-Resultado:
-- pasa de una matriz ROI x tiempo
-- a una matriz ROI x ROI
-
-Importante:
-Este archivo cierra el alcance actual pedido por el tutor:
-preprocesamiento -> transformación -> medidas de conectividad
-
-De momento:
-- implementa conectividad estática,
-- soporta Pearson,
-- deja preparada la arquitectura para ampliar más adelante.
-"""
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import numpy as np

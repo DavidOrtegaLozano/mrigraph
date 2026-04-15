@@ -31,8 +31,7 @@ class ModelData:
         
 class ModelMRIData:
     """
-    Clase añadida para integrar el modelado de fMRI dentro de
-    eegraph.modelateData sin modificar la clase original ModelData de EEG.
+    Clase añadida para integrar el modelado de fMRI dentro de eegraph.modelateData sin modificar la clase original ModelData de EEG.
 
     Esta clase NO trabaja como EEG.
     En MRI, el modelado completo necesita recorrer varias fases:
@@ -42,7 +41,7 @@ class ModelMRIData:
     3. transform a ROI
     4. conectividad
 
-    Así conseguimos que, desde Graph, la experiencia siga siendo simple:
+    Así conseguimos que, desde Graph, la experiencia siga siendo simple para el usuario:
     - load_data(...)
     - modelate(...)
     """
@@ -165,8 +164,8 @@ class ModelMRIData:
         - proyectamos a 2D con una vista anatómica fija,
         - y guardamos una profundidad separada para colorear los nodos.
 
-        Proyección elegida:
-        - coronal: X horizontal, Z vertical, Y = profundidad
+        Proyección por defecto:
+        - axial
         """
         import networkx as nx
         import numpy as np
@@ -211,11 +210,6 @@ class ModelMRIData:
                 pos3d[node] = (x, y, z)
 
                 if projection == "coronal":
-                    # Vista coronal:
-                    # - horizontal: izquierda <-> derecha  -> X
-                    # - vertical:   inferior <-> superior -> Z
-                    # - profundidad: posterior <-> anterior -> Y
-                    # Es como si el sujeto mirase a la 
                     pos2d[node] = (x, z)
                     depth[node] = y
                     G.graph["depth_axis"] = "y"
@@ -255,8 +249,7 @@ class ModelMRIData:
         Ejecuta el workflow completo MRI.
 
         Importante:
-        - 'bands' se acepta por compatibilidad con EEG,
-          pero en MRI no se usa en esta versión.
+        - 'bands' se acepta por compatibilidad con EEG, pero en MRI no se usa en esta versión.
         - Devuelve (connectivity_matrix, G), igual que espera graph.py.
         """
         self._validate_input_bundle()
@@ -356,8 +349,8 @@ class ModelMRIData:
             roi_labels=roi_labels,
             roi_centroids_3d=roi_centroids_3d,
             centroid_coordinate_space=centroid_coordinate_space,
-            #projection="axial",
-            projection="coronal"
+            projection="axial",
+            #projection="coronal"
         )
 
         return G, connectivity_matrix

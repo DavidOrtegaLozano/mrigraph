@@ -18,8 +18,7 @@ class Graph:
         - Si modality='eeg', se ejecuta exactamente el flujo antiguo.
 
         PARTE fMRI (nuevo comportamiento añadido):
-        - Si modality='fmri', delega la carga a una clase específica de mrigraph
-          para no contaminar el flujo original de EEG.
+        - Si modality='fmri', se ejecuta el nuevo flujo de fMRIs.
 
         Parámetros:
         - path: ruta al fichero de entrada.
