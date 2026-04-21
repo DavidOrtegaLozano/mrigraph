@@ -1,4 +1,7 @@
 from .strategy import *
+import re
+import numpy as np
+from scipy.optimize import linear_sum_assignment
 
 #Class that uses the Strategy Abstract class
 class ModelData: 
@@ -30,6 +33,7 @@ class ModelData:
         return self.connectivity_graphs, self.connectivity_matrix
         
 class ModelMRIData:
+
     """
     Clase añadida para integrar el modelado de fMRI dentro de eegraph.modelateData sin modificar la clase original ModelData de EEG.
 
@@ -154,6 +158,141 @@ class ModelMRIData:
         config.threshold = threshold
 
         return config
+    
+    def _infer_lr_partner(self, label):
+        """
+        Intenta deducir la pareja izquierda/derecha de una ROI a partir del nombre.
+
+        Casos cubiertos:
+        - AAL: Precentral_L <-> Precentral_R
+        - variantes Left/Right
+        - si no encuentra patrón, devuelve None
+        """
+        label = str(label)
+
+        patterns = [
+            (r"^(.*)_L$", r"\1_R"),
+            (r"^(.*)_R$", r"\1_L"),
+            (r"^(.*)_Left$", r"\1_Right"),
+            (r"^(.*)_Right$", r"\1_Left"),
+            (r"^(.*)Left$", r"\1Right"),
+            (r"^(.*)Right$", r"\1Left"),
+        ]
+
+        for pattern, replacement in patterns:
+            if re.match(pattern, label):
+                return re.sub(pattern, replacement, label)
+
+        return None
+
+    def _build_symmetric_axial_layout(self, roi_centroids_3d):
+        """
+        Construye una proyección axial simétrica SOLO para visualización.
+
+        Importante:
+        - NO modifica los centroides 3D reales del atlas.
+        - Devuelve:
+            * pos2d: posiciones (x, y) simétricas para dibujar
+            * depth: profundidad z simétrica para colorear
+        - Funciona bien con AAL por nombre (_L/_R).
+        - Para atlas sin nombres anatómicos reales (por ejemplo ROI_1...ROI_n), hace un emparejamiento automático izquierda/derecha usando cercanía en (y, z).
+        """
+        if not roi_centroids_3d:
+            return {}, {}
+
+        raw = {
+            node: (
+                float(coords[0]),
+                float(coords[1]),
+                float(coords[2]),
+            )
+            for node, coords in roi_centroids_3d.items()
+        }
+
+        # Layout base: si algo no se puede emparejar, se queda como está
+        pos2d = {node: (coords[0], coords[1]) for node, coords in raw.items()}
+        depth = {node: coords[2] for node, coords in raw.items()}
+
+        processed = set()
+
+        # ------------------------------------------------------
+        # 1) Emparejamiento explícito por nombre (_L / _R)
+        # ------------------------------------------------------
+        for node in raw:
+            partner = self._infer_lr_partner(node)
+
+            if partner is None or partner not in raw:
+                continue
+
+            if node in processed or partner in processed:
+                continue
+
+            left, right = node, partner
+
+            # Aseguramos que "left" sea el que tenga x menor
+            if raw[left][0] > raw[right][0]:
+                left, right = right, left
+
+            x_left, y_left, z_left = raw[left]
+            x_right, y_right, z_right = raw[right]
+
+            mirrored_x = 0.5 * (abs(x_left) + abs(x_right))
+            avg_y = 0.5 * (y_left + y_right)
+            avg_z = 0.5 * (z_left + z_right)
+
+            pos2d[left] = (-mirrored_x, avg_y)
+            pos2d[right] = (mirrored_x, avg_y)
+
+            depth[left] = avg_z
+            depth[right] = avg_z
+
+            processed.add(left)
+            processed.add(right)
+
+        # ------------------------------------------------------
+        # 2) Fallback automático para atlas sin nombres L/R
+        # ------------------------------------------------------
+        remaining_left = [
+            node for node, (x, _, _) in raw.items()
+            if x < 0 and node not in processed
+        ]
+        remaining_right = [
+            node for node, (x, _, _) in raw.items()
+            if x > 0 and node not in processed
+        ]
+
+        if remaining_left and remaining_right:
+            left_yz = np.array(
+                [[raw[node][1], raw[node][2]] for node in remaining_left],
+                dtype=float
+            )
+            right_yz = np.array(
+                [[raw[node][1], raw[node][2]] for node in remaining_right],
+                dtype=float
+            )
+
+            # Emparejamos cada ROI izquierda con la derecha más parecida en (y, z)
+            cost = np.sum((left_yz[:, None, :] - right_yz[None, :, :]) ** 2, axis=2)
+            row_ind, col_ind = linear_sum_assignment(cost)
+
+            for i, j in zip(row_ind, col_ind):
+                left = remaining_left[i]
+                right = remaining_right[j]
+
+                x_left, y_left, z_left = raw[left]
+                x_right, y_right, z_right = raw[right]
+
+                mirrored_x = 0.5 * (abs(x_left) + abs(x_right))
+                avg_y = 0.5 * (y_left + y_right)
+                avg_z = 0.5 * (z_left + z_right)
+
+                pos2d[left] = (-mirrored_x, avg_y)
+                pos2d[right] = (mirrored_x, avg_y)
+
+                depth[left] = avg_z
+                depth[right] = avg_z
+
+        return pos2d, depth
 
     def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None, roi_centroids_3d=None, centroid_coordinate_space="world", projection="coronal"):
         """
@@ -164,8 +303,8 @@ class ModelMRIData:
         - proyectamos a 2D con una vista anatómica fija,
         - y guardamos una profundidad separada para colorear los nodos.
 
-        Proyección por defecto:
-        - axial
+        En la vista axial aplicamos una simetrización SOLO visual para que
+        los nodos izquierda/derecha queden espejados respecto a la línea media.
         """
         import networkx as nx
         import numpy as np
@@ -187,7 +326,6 @@ class ModelMRIData:
             mapping = {indice: etiqueta for indice, etiqueta in enumerate(roi_labels)}
             G = nx.relabel_nodes(G, mapping)
 
-        # Marcamos explícitamente la modalidad para que tools.py no dependa de "ROI_"
         G.graph["modality"] = "fmri"
         G.graph["coordinate_space"] = centroid_coordinate_space
         G.graph["projection"] = projection
@@ -197,38 +335,58 @@ class ModelMRIData:
             pos3d = {}
             depth = {}
 
+            # Guardamos SIEMPRE la posición 3D real
             for node in G.nodes():
                 centroid = roi_centroids_3d.get(node)
                 if centroid is None:
                     continue
 
                 x, y, z = centroid
-                x = float(x)
-                y = float(y)
-                z = float(z)
+                pos3d[node] = (float(x), float(y), float(z))
 
-                pos3d[node] = (x, y, z)
+            # --------------------------------------------------
+            # Proyección 2D
+            # --------------------------------------------------
+            if projection == "axial":
+                # Vista superior: plano X-Y
+                # Aquí aplicamos la simetría solo para visualización.
+                axial_centroids = {
+                    node: pos3d[node]
+                    for node in G.nodes()
+                    if node in pos3d
+                }
 
-                if projection == "coronal":
+                pos2d, depth = self._build_symmetric_axial_layout(axial_centroids)
+
+                G.graph["depth_axis"] = "z"
+                G.graph["depth_legend"] = "Profundidad Z (inferior ↔ superior)"
+
+            elif projection == "coronal":
+                for node in G.nodes():
+                    if node not in pos3d:
+                        continue
+
+                    x, y, z = pos3d[node]
                     pos2d[node] = (x, z)
                     depth[node] = y
-                    G.graph["depth_axis"] = "y"
-                    G.graph["depth_legend"] = "Profundidad Y (posterior ↔ anterior)"
 
-                elif projection == "axial":
-                    pos2d[node] = (x, y)
-                    depth[node] = z
-                    G.graph["depth_axis"] = "z"
-                    G.graph["depth_legend"] = "Profundidad Z (inferior ↔ superior)"
+                G.graph["depth_axis"] = "y"
+                G.graph["depth_legend"] = "Profundidad Y (posterior ↔ anterior)"
 
-                elif projection == "sagittal":
+            elif projection == "sagittal":
+                for node in G.nodes():
+                    if node not in pos3d:
+                        continue
+
+                    x, y, z = pos3d[node]
                     pos2d[node] = (y, z)
                     depth[node] = x
-                    G.graph["depth_axis"] = "x"
-                    G.graph["depth_legend"] = "Profundidad X (izquierda ↔ derecha)"
 
-                else:
-                    raise ValueError(f"Proyección MRI no soportada: {projection}")
+                G.graph["depth_axis"] = "x"
+                G.graph["depth_legend"] = "Profundidad X (izquierda ↔ derecha)"
+
+            else:
+                raise ValueError(f"Proyección MRI no soportada: {projection}")
 
             if pos3d:
                 nx.set_node_attributes(G, pos3d, "pos3d")
