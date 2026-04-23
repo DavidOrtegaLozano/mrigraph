@@ -195,7 +195,8 @@ class ModelMRIData:
             * pos2d: posiciones (x, y) simétricas para dibujar
             * depth: profundidad z simétrica para colorear
         - Funciona bien con AAL por nombre (_L/_R).
-        - Para atlas sin nombres anatómicos reales (por ejemplo ROI_1...ROI_n), hace un emparejamiento automático izquierda/derecha usando cercanía en (y, z).
+        - Para atlas sin nombres anatómicos reales (por ejemplo ROI_1...ROI_n),
+          hace un emparejamiento automático izquierda/derecha usando cercanía en (y, z).
         """
         if not roi_centroids_3d:
             return {}, {}
@@ -294,7 +295,119 @@ class ModelMRIData:
 
         return pos2d, depth
 
-    def _build_graph_from_matrix(self, connectivity_matrix, roi_labels=None, roi_centroids_3d=None, centroid_coordinate_space="world", projection="coronal"):
+    def _build_symmetric_coronal_layout(self, roi_centroids_3d):
+        """
+        Construye una proyección coronal simétrica SOLO para visualización.
+
+        Devuelve:
+        - pos2d: posiciones (x, z) simétricas para dibujar
+        - depth: profundidad y simétrica para colorear
+        """
+        if not roi_centroids_3d:
+            return {}, {}
+
+        raw = {
+            node: (
+                float(coords[0]),
+                float(coords[1]),
+                float(coords[2]),
+            )
+            for node, coords in roi_centroids_3d.items()
+        }
+
+        # Layout base: si algo no se puede emparejar, se queda como esta
+        pos2d = {node: (coords[0], coords[2]) for node, coords in raw.items()}
+        depth = {node: coords[1] for node, coords in raw.items()}
+
+        processed = set()
+
+        # ------------------------------------------------------
+        # 1) Emparejamiento explicito por nombre (_L / _R)
+        # ------------------------------------------------------
+        for node in raw:
+            partner = self._infer_lr_partner(node)
+
+            if partner is None or partner not in raw:
+                continue
+
+            if node in processed or partner in processed:
+                continue
+
+            left, right = node, partner
+
+            # Aseguramos que "left" sea el que tenga x menor
+            if raw[left][0] > raw[right][0]:
+                left, right = right, left
+
+            x_left, y_left, z_left = raw[left]
+            x_right, y_right, z_right = raw[right]
+
+            mirrored_x = 0.5 * (abs(x_left) + abs(x_right))
+            avg_y = 0.5 * (y_left + y_right)
+            avg_z = 0.5 * (z_left + z_right)
+
+            pos2d[left] = (-mirrored_x, avg_z)
+            pos2d[right] = (mirrored_x, avg_z)
+
+            depth[left] = avg_y
+            depth[right] = avg_y
+
+            processed.add(left)
+            processed.add(right)
+
+        # ------------------------------------------------------
+        # 2) Fallback automatico para atlas sin nombres L/R
+        # ------------------------------------------------------
+        remaining_left = [
+            node for node, (x, _, _) in raw.items()
+            if x < 0 and node not in processed
+        ]
+        remaining_right = [
+            node for node, (x, _, _) in raw.items()
+            if x > 0 and node not in processed
+        ]
+
+        if remaining_left and remaining_right:
+            left_yz = np.array(
+                [[raw[node][1], raw[node][2]] for node in remaining_left],
+                dtype=float
+            )
+            right_yz = np.array(
+                [[raw[node][1], raw[node][2]] for node in remaining_right],
+                dtype=float
+            )
+
+            # Emparejamos cada ROI izquierda con la derecha mas parecida en (y, z)
+            cost = np.sum((left_yz[:, None, :] - right_yz[None, :, :]) ** 2, axis=2)
+            row_ind, col_ind = linear_sum_assignment(cost)
+
+            for i, j in zip(row_ind, col_ind):
+                left = remaining_left[i]
+                right = remaining_right[j]
+
+                x_left, y_left, z_left = raw[left]
+                x_right, y_right, z_right = raw[right]
+
+                mirrored_x = 0.5 * (abs(x_left) + abs(x_right))
+                avg_y = 0.5 * (y_left + y_right)
+                avg_z = 0.5 * (z_left + z_right)
+
+                pos2d[left] = (-mirrored_x, avg_z)
+                pos2d[right] = (mirrored_x, avg_z)
+
+                depth[left] = avg_y
+                depth[right] = avg_y
+
+        return pos2d, depth
+
+    def _build_graph_from_matrix(
+        self,
+        connectivity_matrix,
+        roi_labels=None,
+        roi_centroids_3d=None,
+        centroid_coordinate_space="world",
+        projection="coronal"
+    ):
         """
         Convierte la matriz ROI x ROI en un grafo NetworkX.
 
@@ -362,13 +475,14 @@ class ModelMRIData:
                 G.graph["depth_legend"] = "Profundidad Z (inferior ↔ superior)"
 
             elif projection == "coronal":
-                for node in G.nodes():
-                    if node not in pos3d:
-                        continue
+                # Vista frontal: plano X-Z con simetria izquierda/derecha solo visual.
+                coronal_centroids = {
+                    node: pos3d[node]
+                    for node in G.nodes()
+                    if node in pos3d
+                }
 
-                    x, y, z = pos3d[node]
-                    pos2d[node] = (x, z)
-                    depth[node] = y
+                pos2d, depth = self._build_symmetric_coronal_layout(coronal_centroids)
 
                 G.graph["depth_axis"] = "y"
                 G.graph["depth_legend"] = "Profundidad Y (posterior ↔ anterior)"
