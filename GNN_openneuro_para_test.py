@@ -11,13 +11,14 @@ from __future__ import annotations
 from pathlib import Path
 import copy
 import random
+import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score)
+from sklearn.metrics import (accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score, ConfusionMatrixDisplay)
 from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -28,16 +29,16 @@ from torch_geometric.nn import GCNConv, global_max_pool, global_mean_pool
 # HIPERPARÁMETROS FIJOS
 # ============================================================================
 
-EPOCHS = 50
-PACIENCIA = 5
-LEARNING_RATE = 0.0003
+EPOCHS = 300
+PACIENCIA = 10
+LEARNING_RATE = 0.0005
 DECAY = 0.0001
 USAR_ABSOLUTO = False
-K_VECINOS = 15
+K_VECINOS = 20
 HIDDEN_DIM = 16
-DROPOUT = 0.4
+DROPOUT = 0.6
 UMBRAL = 0.5
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 SEMILLA = 168
 
 # ============================================================================
@@ -45,8 +46,8 @@ SEMILLA = 168
 # ============================================================================
 
 RAIZ_DATOS = Path("./a")
-CARPETA_CONTROL = RAIZ_DATOS / "graphs_threshold03" / "parkinson_control"
-CARPETA_PATIENT = RAIZ_DATOS / "graphs_threshold03" / "parkinson_patient"
+CARPETA_CONTROL = RAIZ_DATOS / "graphs_threshold05" / "parkinson_control"
+CARPETA_PATIENT = RAIZ_DATOS / "graphs_threshold05" / "parkinson_patient"
 
 
 # ============================================================================
@@ -129,7 +130,7 @@ def asignar_dataset_origen(subject_id: str, folder_name: str = "") -> str:
 def es_sujeto_test(subject_id: str, folder_name: str = "") -> bool:
 	sid = normalizar_subject_id(subject_id).lower()
 	carpeta = str(folder_name).lower()
-	return sid.startswith("ds005892") or carpeta.startswith("ds005892") or "ds005892" in sid or "ds005892" in carpeta
+	return sid.startswith("neurocon") or carpeta.startswith("neurocon") or "neurocon" in sid or "neurocon" in carpeta
 
 
 def crear_tabla_muestras() -> pd.DataFrame:
@@ -193,7 +194,7 @@ def dividir_dataset(tabla_filtrada: pd.DataFrame, semilla: int = 42):
 	tabla_train_eval = tabla[~tabla["es_test"]].copy().reset_index(drop=True)
 
 	if tabla_train_eval.empty:
-		raise ValueError("No hay muestras para train/eval tras separar el conjunto de test ds005892")
+		raise ValueError("No hay muestras para train/eval tras separar el conjunto de test neurocon")
 
 	tabla_train_eval.loc[:, "stratify_col"] = tabla_train_eval["label"].astype(str)
 
@@ -470,10 +471,31 @@ def entrenar_modelo(train_graphs, val_graphs, test_graphs, device):
 	mejor_val_auc = float("-inf")
 	mejor_estado_modelo = None
 	epocas_sin_mejora = 0
+	historial = {
+		"epoch": [],
+		"train_loss": [],
+		"train_accuracy": [],
+		"train_f1": [],
+		"train_auc": [],
+		"val_loss": [],
+		"val_accuracy": [],
+		"val_f1": [],
+		"val_auc": [],
+	}
 
 	for epoca in range(1, EPOCHS + 1):
 		metricas_train = entrenar_una_epoca(modelo, train_loader, optimizer, criterio, device, UMBRAL)
 		metricas_val = evaluar_modelo(modelo, val_loader, criterio, device, UMBRAL)
+
+		historial["epoch"].append(epoca)
+		historial["train_loss"].append(metricas_train["loss"])
+		historial["train_accuracy"].append(metricas_train["accuracy"])
+		historial["train_f1"].append(metricas_train["f1"])
+		historial["train_auc"].append(metricas_train["auc"])
+		historial["val_loss"].append(metricas_val["loss"])
+		historial["val_accuracy"].append(metricas_val["accuracy"])
+		historial["val_f1"].append(metricas_val["f1"])
+		historial["val_auc"].append(metricas_val["auc"])
 
 		val_f1_actual = metricas_val["f1"]
 		val_auc_actual = metricas_val["auc"]
@@ -512,6 +534,7 @@ def entrenar_modelo(train_graphs, val_graphs, test_graphs, device):
 	return {
 		"modelo": modelo,
 		"criterio": criterio,
+		"historial": historial,
 		"train": metricas_train_final,
 		"val": metricas_val_final,
 		"test": metricas_test,
@@ -525,6 +548,70 @@ def imprimir_resumen_split(tabla_train: pd.DataFrame, tabla_eval: pd.DataFrame, 
 	_imprimir_resumen_clases("  Train", tabla_train)
 	_imprimir_resumen_clases("  Eval", tabla_eval)
 	_imprimir_resumen_clases("  Test", tabla_test)
+
+
+def imprimir_cuentas_por_dataset(tabla_filtrada: pd.DataFrame) -> None:
+	print("Cuentas por dataset tras filtrado 116x116:")
+	grouped = tabla_filtrada.groupby(["clase", "dataset_origen"]).size().reset_index(name="n")
+	if grouped.empty:
+		print("  No hay muestras.")
+		return
+
+	for clase in ["control", "patient"]:
+		sub = grouped[grouped["clase"] == clase]
+		print(f"  {clase.capitalize()}:")
+		if sub.empty:
+			print("    (ninguno)")
+			continue
+		for _, row in sub.sort_values("n", ascending=False).iterrows():
+			print(f"    {row['dataset_origen']}: {int(row['n'])}")
+	print()
+
+
+def balancear_por_dataset(tabla_filtrada: pd.DataFrame, semilla: int = 42) -> pd.DataFrame:
+	"""Balancear muestras por dataset dentro de cada clase.
+	
+	Mantiene la distribución:
+	- Control: 13 de cada dataset (ds004718, Neurocon, ds005892)
+	- Patient: 25 de cada dataset (ds004392, Neurocon, ds005892)
+	"""
+	rng = np.random.RandomState(semilla)
+	
+	distribucion_objetivo = {
+		"control": {
+			"ds004718": 13,
+			"Neurocon": 13,
+			"ds005892": 13,
+		},
+		"patient": {
+			"ds004392": 25,
+			"Neurocon": 25,
+			"ds005892": 25,
+		},
+	}
+	
+	filas_balanceadas = []
+	
+	for clase in ["control", "patient"]:
+		sub_tabla = tabla_filtrada[tabla_filtrada["clase"] == clase].copy()
+		
+		for dataset, n_objetivo in distribucion_objetivo[clase].items():
+			sub_dataset = sub_tabla[sub_tabla["dataset_origen"] == dataset].copy()
+			n_disponible = len(sub_dataset)
+			
+			if n_disponible == 0:
+				print(f"  ⚠ No hay muestras de {clase}/{dataset}")
+				continue
+			
+			if n_disponible < n_objetivo:
+				print(f"  ⚠ Solo hay {n_disponible} de {clase}/{dataset} (se necesitan {n_objetivo})")
+				filas_balanceadas.extend(sub_dataset.to_dict("records"))
+			else:
+				indices_seleccionados = rng.choice(n_disponible, size=n_objetivo, replace=False)
+				filas_balanceadas.extend(sub_dataset.iloc[indices_seleccionados].to_dict("records"))
+	
+	tabla_balanceada = pd.DataFrame(filas_balanceadas).reset_index(drop=True)
+	return tabla_balanceada
 
 
 def guardar_predicciones(test_graphs, resultado, tabla_test: pd.DataFrame) -> None:
@@ -584,63 +671,129 @@ def guardar_resumen_resultados(resultado, tabla_train: pd.DataFrame, tabla_eval:
 	print(f"✓ Resumen guardado en: {ruta_resumen.absolute()}")
 
 
-def main() -> None:
-	fijar_semilla(SEMILLA)
-	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-	print(f"Dispositivo: {device}")
-	print(f"CUDA disponible: {torch.cuda.is_available()}")
-	print("Hiperparámetros:")
-	print(f"  EPOCHS={EPOCHS}")
-	print(f"  PACIENCIA={PACIENCIA}")
-	print(f"  LEARNING_RATE={LEARNING_RATE}")
-	print(f"  DECAY={DECAY}")
-	print(f"  USAR_ABSOLUTO={USAR_ABSOLUTO}")
-	print(f"  K_VECINOS={K_VECINOS}")
-	print(f"  HIDDEN_DIM={HIDDEN_DIM}")
-	print(f"  DROPOUT={DROPOUT}")
-	print(f"  UMBRAL={UMBRAL}")
-	print(f"  BATCH_SIZE={BATCH_SIZE}")
-	print(f"  SEMILLA={SEMILLA}")
-	print()
-
-	tabla_muestras = crear_tabla_muestras()
-	tabla_116 = filtrar_matrices_tamano_fijo(tabla_muestras, tamano_objetivo=(116, 116))
-	_imprimir_resumen_clases("Resumen tras filtrado 116x116", tabla_116)
-	tabla_train, tabla_eval, tabla_test = dividir_dataset(tabla_116, semilla=SEMILLA)
-
-	imprimir_resumen_split(tabla_train, tabla_eval, tabla_test)
-
-	train_graphs = convertir_tabla_a_lista_grafos(tabla_train, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
-	val_graphs = convertir_tabla_a_lista_grafos(tabla_eval, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
-	test_graphs = convertir_tabla_a_lista_grafos(tabla_test, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
-
-	train_graphs, val_graphs, test_graphs = normalizar_features_grafos(train_graphs, val_graphs, test_graphs)
-
-	resultado = entrenar_modelo(train_graphs, val_graphs, test_graphs, device)
-
-	print("\nResultados finales:")
-	print(
-		f"TRAIN -> Loss: {resultado['train']['loss']:.4f} | Acc: {resultado['train']['accuracy']:.4f} | "
-		f"Recall: {resultado['train']['recall']:.4f} | F1: {resultado['train']['f1']:.4f} | AUC: {resultado['train']['auc']:.4f}"
-	)
-	print(
-		f"EVAL  -> Loss: {resultado['val']['loss']:.4f} | Acc: {resultado['val']['accuracy']:.4f} | "
-		f"Recall: {resultado['val']['recall']:.4f} | F1: {resultado['val']['f1']:.4f} | AUC: {resultado['val']['auc']:.4f}"
-	)
-	print(
-		f"TEST  -> Loss: {resultado['test']['loss']:.4f} | Acc: {resultado['test']['accuracy']:.4f} | "
-		f"Recall: {resultado['test']['recall']:.4f} | F1: {resultado['test']['f1']:.4f} | AUC: {resultado['test']['auc']:.4f}"
-	)
-	print("\nMatriz de confusión de test:")
-	print(resultado["cm"])
-	print("\nClassification report de test:")
-	print(resultado["reporte"])
-
-	# Guardar predicciones y resumen de resultados
-	guardar_predicciones(test_graphs, resultado, tabla_test)
-	guardar_resumen_resultados(resultado, tabla_train, tabla_eval, tabla_test)
+def guardar_historial_entrenamiento(historial) -> None:
+	"""Guarda el historial por época para poder reutilizarlo en gráficas o análisis posterior."""
+	df_historial = pd.DataFrame(historial)
+	ruta_historial = Path("historial_entrenamiento.csv")
+	df_historial.to_csv(ruta_historial, index=False)
+	print(f"✓ Historial guardado en: {ruta_historial.absolute()}")
+	
+def dibujar_curva(historial, clave_train, clave_val, titulo, ylabel, nombre_archivo):
+    """
+    Dibuja una curva de entrenamiento/validación y la guarda a disco.
+    """
+    plt.figure(figsize=(8, 5))
+    plt.plot(historial[clave_train], label=f"Train {ylabel}")
+    plt.plot(historial[clave_val], label=f"Val {ylabel}")
+    plt.title(titulo)
+    plt.xlabel("Época")
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(nombre_archivo, dpi=150)
+    plt.show()
 
 
-if __name__ == "__main__":
-	main()
+
+fijar_semilla(SEMILLA)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print(f"Dispositivo: {device}")
+print(f"CUDA disponible: {torch.cuda.is_available()}")
+print("Hiperparámetros:")
+print(f"  EPOCHS={EPOCHS}")
+print(f"  PACIENCIA={PACIENCIA}")
+print(f"  LEARNING_RATE={LEARNING_RATE}")
+print(f"  DECAY={DECAY}")
+print(f"  USAR_ABSOLUTO={USAR_ABSOLUTO}")
+print(f"  K_VECINOS={K_VECINOS}")
+print(f"  HIDDEN_DIM={HIDDEN_DIM}")
+print(f"  DROPOUT={DROPOUT}")
+print(f"  UMBRAL={UMBRAL}")
+print(f"  BATCH_SIZE={BATCH_SIZE}")
+print(f"  SEMILLA={SEMILLA}")
+print()
+
+tabla_muestras = crear_tabla_muestras()
+tabla_116 = filtrar_matrices_tamano_fijo(tabla_muestras, tamano_objetivo=(116, 116))
+_imprimir_resumen_clases("Resumen tras filtrado 116x116", tabla_116)
+imprimir_cuentas_por_dataset(tabla_116)
+
+print("Aplicando balanceo por dataset...")
+tabla_116 = balancear_por_dataset(tabla_116, semilla=SEMILLA)
+print("Cuentas tras balanceo:")
+imprimir_cuentas_por_dataset(tabla_116)
+
+tabla_train, tabla_eval, tabla_test = dividir_dataset(tabla_116, semilla=SEMILLA)
+
+imprimir_resumen_split(tabla_train, tabla_eval, tabla_test)
+
+train_graphs = convertir_tabla_a_lista_grafos(tabla_train, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
+val_graphs = convertir_tabla_a_lista_grafos(tabla_eval, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
+test_graphs = convertir_tabla_a_lista_grafos(tabla_test, usar_absoluto=USAR_ABSOLUTO, k_vecinos=K_VECINOS)
+
+train_graphs, val_graphs, test_graphs = normalizar_features_grafos(train_graphs, val_graphs, test_graphs)
+
+resultado = entrenar_modelo(train_graphs, val_graphs, test_graphs, device)
+historial = resultado["historial"]
+
+print("\nResultados finales:")
+print(
+    f"TRAIN -> Loss: {resultado['train']['loss']:.4f} | Acc: {resultado['train']['accuracy']:.4f} | "
+    f"Recall: {resultado['train']['recall']:.4f} | F1: {resultado['train']['f1']:.4f} | AUC: {resultado['train']['auc']:.4f}"
+)
+print(
+    f"EVAL  -> Loss: {resultado['val']['loss']:.4f} | Acc: {resultado['val']['accuracy']:.4f} | "
+    f"Recall: {resultado['val']['recall']:.4f} | F1: {resultado['val']['f1']:.4f} | AUC: {resultado['val']['auc']:.4f}"
+)
+print(
+    f"TEST  -> Loss: {resultado['test']['loss']:.4f} | Acc: {resultado['test']['accuracy']:.4f} | "
+    f"Recall: {resultado['test']['recall']:.4f} | F1: {resultado['test']['f1']:.4f} | AUC: {resultado['test']['auc']:.4f}"
+)
+print("\nMatriz de confusión de test:")
+print(resultado["cm"])
+print("\nClassification report de test:")
+print(resultado["reporte"])
+
+# MATRIZ DE CONFUSIÓN
+disp = ConfusionMatrixDisplay(confusion_matrix=resultado["cm"], display_labels=["Control", "Parkinson"])
+disp.plot(cmap="Blues")
+plt.title("Matriz de confusión - Test")
+plt.tight_layout()
+plt.show()
+
+# CURVA DE ACCURACY
+dibujar_curva(
+    historial=historial,
+    clave_train="train_accuracy",
+    clave_val="val_accuracy",
+    titulo="Curva de accuracy",
+    ylabel="Accuracy",
+    nombre_archivo="curva_accuracy_gcnn.png"
+)
+
+# CURVA DE F1 SCORE
+dibujar_curva(
+    historial=historial,
+    clave_train="train_f1",
+    clave_val="val_f1",
+    titulo="Curva de F1-score",
+    ylabel="F1-score",
+    nombre_archivo="curva_f1_gcnn.png"
+)
+
+# CURVA DE AUC
+dibujar_curva(
+    historial=historial,
+    clave_train="train_auc",
+    clave_val="val_auc",
+    titulo="Curva de AUC",
+    ylabel="AUC",
+    nombre_archivo="curva_auc_gcnn.png"
+)
+
+# Guardar predicciones y resumen de resultados
+guardar_historial_entrenamiento(historial)
+guardar_predicciones(test_graphs, resultado, tabla_test)
+guardar_resumen_resultados(resultado, tabla_train, tabla_eval, tabla_test)

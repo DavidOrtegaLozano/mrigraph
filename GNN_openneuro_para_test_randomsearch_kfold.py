@@ -34,6 +34,7 @@ from GNN_openneuro_para_test import (
     RedGCNBinaria,
     entrenar_una_epoca,
     evaluar_modelo,
+    balancear_por_dataset,
 )
 
 
@@ -316,6 +317,11 @@ def main() -> None:
 
 	print("Resumen tras filtrado 116x116:")
 	_imprimir_resumen_clases("  Total dataset", tabla_116)
+	
+	print("Aplicando balanceo por dataset...")
+	tabla_116 = balancear_por_dataset(tabla_116, semilla=SEMILLA)
+	print("Resumen tras balanceo:")
+	_imprimir_resumen_clases("  Total balanceado", tabla_116)
 
 	tabla_cv, tabla_test = _separar_test_y_cv(tabla_116)
 	print("Resumen para cross validation (sin test ds005892):")
