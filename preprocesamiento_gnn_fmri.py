@@ -1,15 +1,13 @@
 """
 Preprocesamiento previo a la transformación a grafo para experimentos con GNN.
 
-Este script se ejecuta ANTES de usar la librería que transforma
-fMRIs en grafos. La idea es separar claramente:
+Este script se ejecuta ANTES de usar la librería que transforma fMRIs en grafos. La idea es separar claramente:
 
 1) Preprocesamiento de señal y control de calidad
 2) Transformación a grafo
-3) Entrenamiento / evaluación de la GNN
 
 Qué hace este script
------------------------
+
 - Carga fMRI en formato NIfTI (.nii / .nii.gz)
 - Busca sidecar JSON del mismo BOLD en la misma carpeta (son los JSON que acompañan los .nii.gz en BIDS)
 - Busca confounds reales del mismo run en la misma carpeta (si no existen, no pasa nada, el pipeline sigue sin regresión de confounds)
@@ -21,16 +19,6 @@ Qué hace este script
 - Scrubbing REAL (solo si existen métricas reales como FD/DVARS/outliers)
 - Band-pass temporal (si existe TR y hay suficientes timepoints)
 - Guarda el BOLD preprocesado y un informe QC por sujeto
-
-Qué NO hace este script
------------------------
-- Motion correction / realignment real
-- Slice timing correction real
-- Normalización espacial real a MNI
-- Armonización automática entre fuentes / escáneres distintos
-
-Esas partes se dejan fuera a propósito para no fingir una estandarización que en
-realidad requiere pipelines más especializados.
 """
 
 from __future__ import annotations
@@ -46,7 +34,14 @@ import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
 from scipy.signal import butter, sosfiltfilt
-from nibabel.processing import resample_to_output
+from nibabel.processing import resample_to_output, resample_from_to
+
+import pickle
+import shutil
+import re
+
+from eegraph.graph import Graph
+from mrigraph.config import AtlasConfig, PreprocessConfig, DenoiseConfig
 
 
 # =============================================================================
@@ -313,7 +308,17 @@ def standardize_geometry(
     apply_common_voxel_resampling: bool,
     target_voxel_size: Tuple[float, float, float],
 ) -> Tuple[nib.Nifti1Image, List[str]]:
+    """
+    Estandariza la geometría del fMRI manteniendo su estructura 4D.
+
+    Importante:
+    - Un fMRI tiene forma (X, Y, Z, T).
+    - Algunas funciones de resampleado solo aceptan imágenes 3D.
+    - Por eso, si el input es 4D, se resamplea volumen a volumen
+      y después se reconstruye el fMRI 4D.
+    """
     applied_steps: List[str] = []
+
     work_img = img
 
     if apply_canonical_reorientation:
@@ -321,12 +326,81 @@ def standardize_geometry(
         applied_steps.append("canonical_reorientation")
 
     if apply_common_voxel_resampling:
-        work_img = resample_to_output(
-            work_img,
-            voxel_sizes=target_voxel_size,
-            order=3,  # interpolación trilineal
-        )
-        applied_steps.append("common_voxel_resampling")
+        shape = work_img.shape
+
+        if len(shape) == 3:
+            work_img = resample_to_output(
+                work_img,
+                voxel_sizes=target_voxel_size,
+                order=3,
+            )
+            applied_steps.append("common_voxel_resampling")
+
+        elif len(shape) == 4:
+            data_4d = work_img.get_fdata(dtype=np.float32)
+            num_timepoints = data_4d.shape[3]
+
+            # Primero resampleamos el primer volumen para definir el grid destino.
+            first_vol_img = nib.Nifti1Image(
+                data_4d[..., 0],
+                affine=work_img.affine,
+            )
+
+            first_resampled = resample_to_output(
+                first_vol_img,
+                voxel_sizes=target_voxel_size,
+                order=3,
+            )
+
+            target = (
+                first_resampled.shape,
+                first_resampled.affine,
+            )
+
+            resampled_volumes = []
+
+            for t in range(num_timepoints):
+                vol_img = nib.Nifti1Image(
+                    data_4d[..., t],
+                    affine=work_img.affine,
+                )
+
+                vol_resampled = resample_from_to(
+                    vol_img,
+                    target,
+                    order=3,
+                )
+
+                resampled_volumes.append(
+                    vol_resampled.get_fdata(dtype=np.float32)
+                )
+
+            resampled_data_4d = np.stack(resampled_volumes, axis=3).astype(np.float32)
+
+            new_header = first_resampled.header.copy()
+            work_img = nib.Nifti1Image(
+                resampled_data_4d,
+                affine=first_resampled.affine,
+                header=new_header,
+            )
+
+            # Intentamos conservar el TR original en la cabecera.
+            try:
+                original_zooms = img.header.get_zooms()
+                spatial_zooms = first_resampled.header.get_zooms()[:3]
+
+                if len(original_zooms) >= 4:
+                    tr = original_zooms[3]
+                    work_img.header.set_zooms(tuple(spatial_zooms) + (tr,))
+            except Exception:
+                pass
+
+            applied_steps.append("common_voxel_resampling_4d_volume_by_volume")
+
+        else:
+            raise ValueError(
+                f"Se esperaba una imagen 3D o 4D, pero se obtuvo shape {shape}."
+            )
 
     return work_img, applied_steps
 
@@ -925,67 +999,540 @@ def save_global_summary(reports: Sequence[QCReport], output_root: Path) -> Path:
 
 
 # =============================================================================
-# CLI
+# TRANSFORMACIÓN A GRAFO TRAS EL PREPROCESAMIENTO (y cosas propias de este experimento)
 # =============================================================================
-# Esto permite ejecutar el script desde terminal.
-# =============================================================================
+
+def limpiar_nombre_carpeta(texto: str) -> str:
+    """
+    Convierte un texto en un nombre seguro para carpetas.
+    Evita espacios, barras, caracteres raros, etc.
+    """
+    texto = texto.strip()
+    texto = re.sub(r"[^\w\-.]+", "_", texto, flags=re.UNICODE)
+    texto = texto.strip("_")
+    return texto if texto else "sin_nombre"
+
+
+def obtener_id_fmri_para_salida(bold_path: Path, dataset_root: Path) -> str:
+    """
+    Construye un identificador estable para la salida del grafo.
+
+    Prioridad:
+    1) Si existe una carpeta sub-XXX, usa sub-XXX.
+    2) Si existe ses-XXX, también la añade.
+    3) Si hay riesgo de colisión por varios runs, añade el nombre del BOLD.
+
+    Ejemplo:
+    ds004718-sub-001
+    ds004718-sub-001-ses-01
+    ds004718-sub-001-ses-01-task-rest_run-1_bold
+    """
+    rel_parts = bold_path.relative_to(dataset_root).parts
+
+    sub = next((p for p in rel_parts if p.startswith("sub-")), None)
+    ses = next((p for p in rel_parts if p.startswith("ses-")), None)
+
+    stem = remove_nii_extension(bold_path.name)
+
+    partes = []
+    if sub:
+        partes.append(sub)
+    if ses:
+        partes.append(ses)
+
+    if partes:
+        # Añadimos el stem para evitar sobrescribir si hay varios runs del mismo sujeto.
+        partes.append(stem)
+        return limpiar_nombre_carpeta("-".join(partes))
+
+    # Si el dataset no está en formato BIDS, usamos carpeta padre + stem.
+    return limpiar_nombre_carpeta(f"{bold_path.parent.name}-{stem}")
+
+
+def construir_carpeta_salida_grafo(
+    dataset_name: str,
+    raw_bold_path: Path,
+    dataset_root: Path,
+    graphs_root: Path,
+) -> Path:
+    """
+    Crea la ruta final:
+    a/graphs/nombreDataset-nombreCarpetaDelFMRI
+    """
+    id_fmri = obtener_id_fmri_para_salida(raw_bold_path, dataset_root)
+    nombre_salida = limpiar_nombre_carpeta(f"{dataset_name}-{id_fmri}")
+    return graphs_root / nombre_salida
+
+
+def iter_bold_files_para_pipeline(root: Path, config: PipelineConfig, strict_rest_only: bool) -> Iterable[Path]:
+    """
+    Busca archivos BOLD válidos para el flujo completo.
+
+    Reglas:
+    - Ignora siempre derivatives, sourcedata, phenotype, anat, eeg, etc.
+    - En datasets OpenNeuro exige resting-state por nombre:
+      *_task-rest_bold.nii.gz o *_task-resting_bold.nii.gz.
+    - En Neurocon es más flexible, porque puede no seguir exactamente BIDS.
+    - Evita coger datos ya preprocesados externos.
+    """
+    dataset_name = root.name.lower()
+
+    for pattern in config.bold_patterns:
+        for path in root.rglob(pattern):
+            partes_lower = [part.lower() for part in path.parts]
+            name = path.name.lower()
+
+            # 1. Ignorar carpetas que no deben entrar nunca
+            if path_contains_ignored_folder(path, config.ignore_folders):
+                continue
+
+            # 2. Solo ficheros BOLD NIfTI
+            if not (name.endswith("_bold.nii.gz") or name.endswith("_bold.nii")):
+                continue
+
+            # 3. Evitar cualquier fichero preprocesado externo
+            if (
+                "desc-preprocessed" in name
+                or "preprocessed" in name
+                or "preproc" in name
+                or "denoised" in name
+                or "smoothed" in name
+            ):
+                continue
+
+            # 4. Regla especial para Neurocon
+            if "neurocon" in dataset_name:
+                # Si Neurocon no sigue BIDS, aceptamos BOLD siempre que no venga
+                # de carpetas ignoradas. Si además tiene rest en el nombre, perfecto.
+                yield path
+                continue
+
+            # 5. Para OpenNeuro, exigimos resting-state
+            es_resting = (
+                "_task-rest_" in name
+                or "_task-resting_" in name
+                or "task-rest_bold" in name
+                or "task-resting_bold" in name
+            )
+
+            if strict_rest_only and not es_resting:
+                continue
+
+            # 6. En OpenNeuro normalmente debe estar dentro de func
+            if "func" not in partes_lower:
+                continue
+
+            yield path
+
+
+def transformar_bold_preprocesado_a_grafo(
+    preprocessed_bold_path: Path,
+    raw_bold_path: Path,
+    dataset_root: Path,
+    dataset_name: str,
+    graphs_root: Path,
+    atlas_name: str,
+    connectivity: str,
+    threshold: float,
+    save_png: bool,
+    qc_report: QCReport,
+) -> None:
+    """
+    Carga el BOLD preprocesado, lo transforma con la librería y guarda:
+    - grafo_fmri.pkl
+    - connectivity_matrix_fmri.npz
+    - fmri_grafo_plot.html
+    - fmri_grafo.png, si el entorno tiene kaleido disponible
+    - metadata_transformacion.json
+    - qc_report.json
+    """
+    salida = construir_carpeta_salida_grafo(
+        dataset_name=dataset_name,
+        raw_bold_path=raw_bold_path,
+        dataset_root=dataset_root,
+        graphs_root=graphs_root,
+    )
+    salida.mkdir(parents=True, exist_ok=True)
+
+    print("Transformando a grafo:", preprocessed_bold_path)
+    print("Carpeta de salida:", salida)
+
+    atlas_config = AtlasConfig(atlas_name=atlas_name)
+
+    # Como el BOLD ya ha pasado por el preprocesamiento externo,
+    # desactivamos aquí los pasos internos equivalentes para evitar duplicarlos.
+    preprocess_config_graph = PreprocessConfig(
+        apply_motion_correction=False,
+        apply_slice_timing=False,
+        apply_outlier_detection=False,
+        apply_normalization=False,
+        apply_smoothing=False,
+    )
+
+    denoise_config_graph = DenoiseConfig(
+        regress_confounds=False,
+        apply_scrubbing=False,
+        apply_bandpass=False,
+    )
+
+    G = Graph()
+    G.load_data(
+        path=str(preprocessed_bold_path),
+        modality="fmri",
+    )
+
+    grafo_fmri, connectivity_matrix = G.modelate(
+        window_size=1.0,
+        connectivity=connectivity,
+        threshold=threshold,
+        atlas_config=atlas_config,
+        preprocess_config=preprocess_config_graph,
+        denoise_config=denoise_config_graph,
+    )
+
+    connectivity_matrix = np.array(connectivity_matrix)
+
+    ruta_grafo = salida / "grafo_fmri.pkl"
+    with open(ruta_grafo, "wb") as f:
+        pickle.dump(grafo_fmri, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    ruta_matriz = salida / "connectivity_matrix_fmri.npz"
+    np.savez(ruta_matriz, connectivity_matrix=connectivity_matrix)
+
+    # Visualización HTML
+    G.visualize_html(
+        grafo_fmri,
+        salida / "fmri_grafo",
+        auto_open=False,
+    )
+
+    # Visualización PNG
+    png_generado = False
+    png_error = None
+
+    if save_png:
+        try:
+            G.visualize_png(
+                grafo_fmri,
+                salida / "fmri_grafo",
+            )
+            png_generado = True
+        except Exception as exc:
+            png_error = str(exc)
+            print("[AVISO] No se pudo generar PNG. El HTML sí se ha generado.")
+            print("Detalle PNG:", png_error)
+
+    transform_bundle = G.metadata.get("transform_bundle")
+    connectivity_bundle = G.metadata.get("connectivity_bundle")
+
+    metadata = {
+        "dataset_name": dataset_name,
+        "raw_bold": str(raw_bold_path),
+        "preprocessed_bold": str(preprocessed_bold_path),
+        "graph_output_folder": str(salida),
+        "atlas_name": atlas_name,
+        "connectivity": connectivity,
+        "threshold": threshold,
+        "matrix_shape": list(connectivity_matrix.shape),
+        "num_nodes": grafo_fmri.number_of_nodes(),
+        "num_edges": grafo_fmri.number_of_edges(),
+        "graph_file": str(ruta_grafo),
+        "matrix_file": str(ruta_matriz),
+        "html_file": str(salida / "fmri_grafo_plot.html"),
+        "png_file": str(salida / "fmri_grafo.png") if png_generado else None,
+        "png_error": png_error,
+        "qc_report": asdict(qc_report),
+    }
+
+    if transform_bundle is not None:
+        metadata["transform_bundle"] = {
+            "atlas_name": getattr(transform_bundle, "atlas_name", None),
+            "atlas_resampled": getattr(transform_bundle, "atlas_resampled", None),
+            "centroid_coordinate_space": getattr(transform_bundle, "centroid_coordinate_space", None),
+            "num_rois": getattr(transform_bundle, "transform_metadata", {}).get("num_rois")
+            if getattr(transform_bundle, "transform_metadata", None) is not None
+            else None,
+            "roi_labels_first_10": getattr(transform_bundle, "roi_labels", [])[:10],
+        }
+
+    if connectivity_bundle is not None:
+        metadata["connectivity_bundle_available"] = True
+
+    ruta_metadata = salida / "metadata_transformacion.json"
+    ruta_metadata.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Copia rápida del QC junto al grafo para tener todo junto.
+    ruta_qc_local = salida / "qc_report.json"
+    ruta_qc_local.write_text(
+        json.dumps(asdict(qc_report), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    print("Grafo guardado en:", ruta_grafo)
+    print("Matriz guardada en:", ruta_matriz)
+    print("HTML guardado en:", salida / "fmri_grafo_plot.html")
+
+    if png_generado:
+        print("PNG guardado en:", salida / "fmri_grafo.png")
+
+    print("Metadata guardada en:", ruta_metadata)
+
+
+def iter_dataset_roots(input_root: Path, selected_datasets: Optional[List[str]]) -> Iterable[Path]:
+    """
+    Devuelve las carpetas de dataset dentro de z/.
+
+    Esperado:
+    z/
+      neurocon/
+      ds004718/
+      ds004392/
+      ds005892/
+
+    Si input_root apunta directamente a un dataset, también funciona.
+    """
+    input_root = input_root.resolve()
+
+    if selected_datasets:
+        for dataset in selected_datasets:
+            candidate = input_root / dataset
+            if candidate.exists() and candidate.is_dir():
+                yield candidate
+            else:
+                print(f"[AVISO] Dataset no encontrado y se omite: {candidate}")
+        return
+
+    children = sorted([p for p in input_root.iterdir() if p.is_dir()])
+
+    # Si dentro hay carpetas de datasets, usamos esas.
+    if children:
+        for child in children:
+            if child.name.lower() in {"graph", "graphs", "__pycache__"}:
+                continue
+            yield child
+    else:
+        # Caso raro: input_root no tiene subcarpetas.
+        yield input_root
+
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Preprocesamiento previo a la transformación a grafo para GNN."
+        description="Preprocesa fMRIs y genera archivos para GNN en un único flujo."
     )
-    parser.add_argument("--input-root", type=Path, required=True, help="Raíz con los BOLD raw.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Raíz donde guardar los BOLD preprocesados.")
+
     parser.add_argument(
-        "--source-name",
-        type=str,
-        default="desconocida",
-        help="Nombre de la fuente/dataset. Se guarda en el informe QC para trazabilidad.",
+        "--input-root",
+        type=Path,
+        default=Path("./z"),
+        help="Carpeta raíz con los datasets raw. Por defecto: ./z",
     )
+
+    parser.add_argument(
+        "--preprocessed-root",
+        type=Path,
+        default=Path("./a/preprocessed"),
+        help="Carpeta donde guardar los BOLD preprocesados. Por defecto: ./a/preprocessed",
+    )
+
+    parser.add_argument(
+        "--graphs-root",
+        type=Path,
+        default=Path("./a/graphs"),
+        help="Carpeta donde guardar grafos, matrices, HTML y PNG. Por defecto: ./a/graphs",
+    )
+
+    parser.add_argument(
+        "--datasets",
+        nargs="*",
+        default=None,
+        help="Opcional. Lista de datasets concretos dentro de z/ que quieres procesar.",
+    )
+
+    parser.add_argument(
+        "--atlas",
+        type=str,
+        default="aal",
+        choices=["aal", "schaefer_100", "schaefer_200", "schaefer_400"],
+        help="Atlas a usar para transformar fMRI a grafo.",
+    )
+
+    parser.add_argument(
+        "--connectivity",
+        type=str,
+        default="pearson",
+        help="Medida de conectividad. Por defecto: pearson",
+    )
+
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.7,
+        help="Umbral de conectividad para crear aristas. Por defecto: 0.7",
+    )
+
+    parser.add_argument(
+        "--strict-rest-only",
+        action="store_true",
+        help="Si se activa, solo procesa BOLD con _task-rest_ o _task-resting_ en el nombre.",
+    )
+
+    parser.add_argument(
+        "--no-png",
+        action="store_true",
+        help="Si se activa, no intenta guardar PNG. Útil si no tienes kaleido instalado.",
+    )
+
     return parser.parse_args()
+
+SUJETOS_DS005892_REINTENTO = {
+    "sub-MJF037",
+    "sub-MJF038",
+    
+}
+
+
+def es_bold_permitido_para_reintento(
+    bold_path: Path,
+    dataset_root: Path,
+) -> bool:
+    """
+    Filtro temporal para procesar únicamente:
+    - Sujetos concretos de ds005892 que fallaron por espacio.
+
+    Esto evita volver a procesar ds004718, ds004392 y el resto de sujetos.
+    """
+    dataset_name = dataset_root.name.lower()
+    partes = set(bold_path.parts)
+
+    # ds005892 solo con los sujetos indicados
+    if dataset_name == "ds005892":
+        return any(sujeto in partes for sujeto in SUJETOS_DS005892_REINTENTO)
+
+    # Cualquier otro dataset se ignora
+    return False
 
 
 def main() -> None:
     args = parse_args()
-    config = PipelineConfig()
 
     input_root: Path = args.input_root
-    output_root: Path = args.output_root
-    source_name: str = args.source_name
+    preprocessed_root: Path = args.preprocessed_root
+    graphs_root: Path = args.graphs_root
 
-    bold_files = sorted(iter_rest_bold_files(input_root, config))
+    config = PipelineConfig()
+
+    preprocessed_root.mkdir(parents=True, exist_ok=True)
+    graphs_root.mkdir(parents=True, exist_ok=True)
+
     print("=" * 90)
-    print(f"BOLD rest detectados para procesar: {len(bold_files)}")
-    print(f"Fuente declarada: {source_name}")
+    print("FLUJO COMPLETO fMRI -> PREPROCESAMIENTO -> GRAFO PARA GNN")
+    print("=" * 90)
+    print("Input root:", input_root)
+    print("Preprocessed root:", preprocessed_root)
+    print("Graphs root:", graphs_root)
+    print("Atlas:", args.atlas)
+    print("Conectividad:", args.connectivity)
+    print("Threshold:", args.threshold)
+    print("Strict rest only:", args.strict_rest_only)
     print("=" * 90)
 
-    reports: List[QCReport] = []
-    for idx, bold_path in enumerate(bold_files, start=1):
-        print("\n" + "-" * 90)
-        print(f"[{idx}/{len(bold_files)}] Procesando: {bold_path}")
-        try:
-            report = preprocess_single_bold(
-                bold_path=bold_path,
-                input_root=input_root,
-                output_root=output_root,
-                source_name=source_name,
+    all_reports: List[QCReport] = []
+
+    dataset_roots = list(iter_dataset_roots(input_root, args.datasets))
+
+    if not dataset_roots:
+        print("[AVISO] No se encontraron datasets para procesar.")
+        return
+
+    for dataset_root in dataset_roots:
+        dataset_name = limpiar_nombre_carpeta(dataset_root.name)
+        dataset_preprocessed_root = preprocessed_root / dataset_name
+
+        print("\n" + "#" * 90)
+        print(f"DATASET: {dataset_name}")
+        print(f"Ruta raw: {dataset_root}")
+        print(f"Ruta preprocesada: {dataset_preprocessed_root}")
+        print("#" * 90)
+
+        bold_files = sorted(
+            bold_path
+            for bold_path in iter_bold_files_para_pipeline(
+                root=dataset_root,
                 config=config,
+                strict_rest_only=True,
             )
-            reports.append(report)
-            print(f"OK -> salida: {report.output_bold}")
-            print(f"   TR detectado: {report.tr_seconds}")
-            print(f"   Outliers QC: {report.num_outlier_volumes}")
-            print(f"   Confounds reales usados: {report.real_confounds_used}")
-            print(f"   Scrubbing aplicado: {report.scrubbing_applied} ({report.num_scrubbed_volumes} volúmenes)")
-            print(f"   Band-pass aplicado: {report.bandpass_applied}")
-        except Exception as exc:
-            print(f"ERROR procesando {bold_path}: {exc}")
+            if es_bold_permitido_para_reintento(
+                bold_path=bold_path,
+                dataset_root=dataset_root,
+            )
+        )
 
-    summary_path = save_global_summary(reports, output_root)
-    print("\n" + "=" * 90)
-    print(f"Resumen global guardado en: {summary_path}")
-    print("=" * 90)
+        print(f"BOLD detectados: {len(bold_files)}")
+
+        if not bold_files:
+            print(f"[AVISO] No se encontraron BOLD en {dataset_root}")
+            continue
+
+        dataset_reports: List[QCReport] = []
+
+        for idx, bold_path in enumerate(bold_files, start=1):
+            print("\n" + "-" * 90)
+            print(f"[{idx}/{len(bold_files)}] Procesando BOLD raw:")
+            print(bold_path)
+            print("-" * 90)
+
+            try:
+                report = preprocess_single_bold(
+                    bold_path=bold_path,
+                    input_root=dataset_root,
+                    output_root=dataset_preprocessed_root,
+                    source_name=dataset_name,
+                    config=config,
+                )
+
+                dataset_reports.append(report)
+                all_reports.append(report)
+
+                print("OK preprocesamiento ->", report.output_bold)
+                print("TR detectado:", report.tr_seconds)
+                print("Outliers QC:", report.num_outlier_volumes)
+                print("Confounds reales usados:", report.real_confounds_used)
+                print("Scrubbing aplicado:", report.scrubbing_applied)
+                print("Band-pass aplicado:", report.bandpass_applied)
+
+                transformar_bold_preprocesado_a_grafo(
+                    preprocessed_bold_path=Path(report.output_bold),
+                    raw_bold_path=bold_path,
+                    dataset_root=dataset_root,
+                    dataset_name=dataset_name,
+                    graphs_root=graphs_root,
+                    atlas_name=args.atlas,
+                    connectivity=args.connectivity,
+                    threshold=args.threshold,
+                    save_png=not args.no_png,
+                    qc_report=report,
+                )
+
+            except Exception as exc:
+                print("[ERROR] Fallo procesando:")
+                print(bold_path)
+                print("Detalle:", exc)
+
+        if dataset_reports:
+            summary_path = save_global_summary(dataset_reports, dataset_preprocessed_root)
+            print("\nResumen QC del dataset guardado en:", summary_path)
+
+    if all_reports:
+        global_summary_path = save_global_summary(all_reports, preprocessed_root)
+        print("\n" + "=" * 90)
+        print("Resumen QC global guardado en:", global_summary_path)
+        print("=" * 90)
+
+    print("\nProceso completo terminado.")
 
 
 if __name__ == "__main__":

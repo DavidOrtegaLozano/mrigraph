@@ -42,14 +42,14 @@ from GNN_openneuro_para_test import (
 # HIPERPARÁMETROS A BUSCAR
 # ============================================================================
 
-LEARNING_RATE_LIST = [0.00003, 0.0001, 0.0003, 0.0005, 0.001]
+LEARNING_RATE_LIST = [0.0005]
 DROPOUT_LIST = [0.2, 0.3, 0.4, 0.45, 0.5, 0.6]
-HIDDEN_DIM_LIST = [16, 32, 64]
-K_VECINOS_LIST = [15, 20, 25]
-EPOCHS_LIST = [50]
-PACIENCIA_LIST = [5]
-DECAY_LIST = [1e-5, 1e-4, 1e-3]
-BATCH_SIZE_LIST = [8, 16, 32]
+HIDDEN_DIM_LIST = [16]
+K_VECINOS_LIST = [20, 25]
+EPOCHS_LIST = [300]
+PACIENCIA_LIST = [10]
+DECAY_LIST = [0.0001]
+BATCH_SIZE_LIST = [32]
 N_RANDOM_TRIALS = 70
 CV_FOLDS = 5
 
