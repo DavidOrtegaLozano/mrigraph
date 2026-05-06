@@ -30,16 +30,16 @@ from torch_geometric.nn import GCNConv, global_max_pool, global_mean_pool
 # ============================================================================
 
 EPOCHS = 300
-PACIENCIA = 10
-LEARNING_RATE = 0.0005
+PACIENCIA = 20
+LEARNING_RATE = 0.0004
 DECAY = 0.0001
 USAR_ABSOLUTO = False
-K_VECINOS = 20
-HIDDEN_DIM = 16
-DROPOUT = 0.6
+K_VECINOS = 115
+HIDDEN_DIM = 32
+DROPOUT = 0.2
 UMBRAL = 0.5
 BATCH_SIZE = 32
-SEMILLA = 168
+SEMILLA = 64
 
 # ============================================================================
 # RUTAS
@@ -114,6 +114,8 @@ def asignar_dataset_origen(subject_id: str, folder_name: str = "") -> str:
 		return "ds004392"
 	if "neurocon" in sid or "neurocon" in carpeta:
 		return "Neurocon"
+	if "mendeley" in sid or "mendeley" in carpeta:
+		return "mendeley"
 
 	if sid.startswith("sub-control03") or sid.startswith("sub-patient03"):
 		return "Neurocon"
@@ -196,32 +198,33 @@ def dividir_dataset(tabla_filtrada: pd.DataFrame, semilla: int = 42):
 	if tabla_train_eval.empty:
 		raise ValueError("No hay muestras para train/eval tras separar el conjunto de test neurocon")
 
-	tabla_train_eval.loc[:, "stratify_col"] = tabla_train_eval["label"].astype(str)
+	rng = np.random.RandomState(semilla)
+	filas_train = []
+	filas_eval = []
 
-	try:
-		tabla_train_suj, tabla_eval_suj = train_test_split(
-			tabla_train_eval,
-			test_size=0.20,
-			random_state=semilla,
-			stratify=tabla_train_eval["stratify_col"],
-		)
-	except ValueError:
-		tabla_train_suj, tabla_eval_suj = train_test_split(
-			tabla_train_eval,
-			test_size=0.20,
-			random_state=semilla,
-			shuffle=True,
-		)
+	for _, sub_tabla in tabla_train_eval.groupby(["clase", "dataset_origen"], sort=True):
+		sub_tabla = sub_tabla.sample(frac=1.0, random_state=semilla).reset_index(drop=True)
+		n_total = len(sub_tabla)
 
-	tabla_train_suj = tabla_train_suj.drop(columns=["stratify_col"], errors="ignore").copy()
-	tabla_eval_suj = tabla_eval_suj.drop(columns=["stratify_col"], errors="ignore").copy()
+		if n_total == 1:
+			filas_train.extend(sub_tabla.to_dict("records"))
+			continue
 
-	train_ids = set(tabla_train_suj["subject_id_base"])
-	eval_ids = set(tabla_eval_suj["subject_id_base"])
+		n_eval = int(round(n_total * 0.2))
+		n_eval = max(1, min(n_eval, n_total - 1))
+		indices_eval = set(rng.choice(n_total, size=n_eval, replace=False))
+
+		for indice, fila in sub_tabla.iterrows():
+			registro = fila.to_dict()
+			if indice in indices_eval:
+				filas_eval.append(registro)
+			else:
+				filas_train.append(registro)
+
+	tabla_train = pd.DataFrame(filas_train).reset_index(drop=True)
+	tabla_eval = pd.DataFrame(filas_eval).reset_index(drop=True)
 	test_ids = set(tabla_test["subject_id_base"])
 
-	tabla_train = tabla[tabla["subject_id_base"].isin(train_ids)].copy().reset_index(drop=True)
-	tabla_eval = tabla[tabla["subject_id_base"].isin(eval_ids)].copy().reset_index(drop=True)
 	tabla_test = tabla[tabla["subject_id_base"].isin(test_ids)].copy().reset_index(drop=True)
 
 	return tabla_train, tabla_eval, tabla_test
@@ -578,17 +581,18 @@ def balancear_por_dataset(tabla_filtrada: pd.DataFrame, semilla: int = 42) -> pd
 	rng = np.random.RandomState(semilla)
 	
 	distribucion_objetivo = {
-		"control": {
-			"ds004718": 13,
-			"Neurocon": 13,
-			"ds005892": 13,
-		},
-		"patient": {
-			"ds004392": 25,
-			"Neurocon": 25,
-			"ds005892": 25,
-		},
-	}
+        "control": {
+            "mendeley": 66, # TRAIN/EVAL
+            #"ds004718": 46, # TRAIN/EVAL
+            "Neurocon": 25, # TEST
+            "ds005892": 13, # TRAIN/EVAL
+        },
+        "patient": {
+            "ds004392": 55, # TRAIN/EVAL
+            "Neurocon": 25, # TEST
+            "ds005892": 25, # TRAIN/EVAL
+        },
+    }
 	
 	filas_balanceadas = []
 	
