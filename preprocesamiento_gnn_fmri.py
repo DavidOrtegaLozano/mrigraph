@@ -1100,10 +1100,10 @@ def iter_bold_files_para_pipeline(root: Path, config: PipelineConfig, strict_res
             ):
                 continue
 
-            # 4. Regla especial para Neurocon
-            if "neurocon" in dataset_name:
-                # Si Neurocon no sigue BIDS, aceptamos BOLD siempre que no venga
-                # de carpetas ignoradas. Si además tiene rest en el nombre, perfecto.
+            # 4. Regla especial para Neurocon y datasets flexibles
+            if "neurocon" in dataset_name or "mendeley" in dataset_name:
+                # Si Neurocon o Mendeley no siguen BIDS estricto, aceptamos BOLD
+                # siempre que no venga de carpetas ignoradas.
                 yield path
                 continue
 
@@ -1118,8 +1118,9 @@ def iter_bold_files_para_pipeline(root: Path, config: PipelineConfig, strict_res
             if strict_rest_only and not es_resting:
                 continue
 
-            # 6. En OpenNeuro normalmente debe estar dentro de func
-            if "func" not in partes_lower:
+            # 6. En OpenNeuro normalmente debe estar dentro de func, pero si tiene
+            # formato BIDS válido (sub-*_task-rest_bold), lo aceptamos igual
+            if "func" not in partes_lower and not es_resting:
                 continue
 
             yield path
@@ -1370,8 +1371,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.7,
-        help="Umbral de conectividad para crear aristas. Por defecto: 0.7",
+        default=0.5,
+        help="Umbral de conectividad para crear aristas. Por defecto: 0.5",
     )
 
     parser.add_argument(
@@ -1387,12 +1388,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     return parser.parse_args()
-
-SUJETOS_DS005892_REINTENTO = {
-    "sub-MJF037",
-    "sub-MJF038",
-    
-}
 
 
 def es_bold_permitido_para_reintento(
@@ -1459,15 +1454,10 @@ def main() -> None:
         print("#" * 90)
 
         bold_files = sorted(
-            bold_path
-            for bold_path in iter_bold_files_para_pipeline(
+            iter_bold_files_para_pipeline(
                 root=dataset_root,
                 config=config,
-                strict_rest_only=True,
-            )
-            if es_bold_permitido_para_reintento(
-                bold_path=bold_path,
-                dataset_root=dataset_root,
+                strict_rest_only=args.strict_rest_only,
             )
         )
 
@@ -1484,6 +1474,18 @@ def main() -> None:
             print(f"[{idx}/{len(bold_files)}] Procesando BOLD raw:")
             print(bold_path)
             print("-" * 90)
+
+            # Check si ya existe en a/graphs/
+            output_folder_grafo = construir_carpeta_salida_grafo(
+                dataset_name=dataset_name,
+                raw_bold_path=bold_path,
+                dataset_root=dataset_root,
+                graphs_root=graphs_root,
+            )
+            if output_folder_grafo.exists():
+                print(f"[SKIP] Ya existe: {output_folder_grafo}")
+                print("Se omite reprocesamiento.")
+                continue
 
             try:
                 report = preprocess_single_bold(

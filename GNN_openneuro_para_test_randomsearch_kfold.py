@@ -1,4 +1,4 @@
-"""Random search con cross validation para GNN en Parkinson control vs patient.
+"""Grid search con cross validation para GNN en Parkinson control vs patient.
 
 Este script reutiliza el pipeline de carga y modelado del script base, pero:
 - reserva por completo ds005892 para test
@@ -13,13 +13,13 @@ from __future__ import annotations
 from copy import deepcopy
 from itertools import product
 from pathlib import Path
-import random
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.model_selection import StratifiedKFold
+from IPython.display import display
 from torch_geometric.loader import DataLoader
 
 from GNN_openneuro_para_test import (
@@ -29,6 +29,7 @@ from GNN_openneuro_para_test import (
     fijar_semilla,
     crear_tabla_muestras,
     filtrar_matrices_tamano_fijo,
+	dividir_dataset,
     convertir_tabla_a_lista_grafos,
     normalizar_features_grafos,
     RedGCNBinaria,
@@ -43,15 +44,15 @@ from GNN_openneuro_para_test import (
 # ============================================================================
 
 LEARNING_RATE_LIST = [0.0005]
-DROPOUT_LIST = [0.2, 0.3, 0.4, 0.45, 0.5, 0.6]
-HIDDEN_DIM_LIST = [16]
-K_VECINOS_LIST = [20, 25]
+DROPOUT_LIST = [0.2]
+HIDDEN_DIM_LIST = [64]
+K_VECINOS_LIST = [115]
 EPOCHS_LIST = [300]
-PACIENCIA_LIST = [10]
+PACIENCIA_LIST = [10, 20]
 DECAY_LIST = [0.0001]
-BATCH_SIZE_LIST = [32]
-N_RANDOM_TRIALS = 70
+BATCH_SIZE_LIST = [16]
 CV_FOLDS = 5
+ALEATORIOS_COMBINACIONES = 4
 
 
 # ============================================================================
@@ -112,33 +113,23 @@ def _cargar_grafos_por_k(tabla: pd.DataFrame, k_vecinos: int):
 	)
 
 
-def _separar_test_y_cv(tabla: pd.DataFrame):
-	tabla = tabla.copy().reset_index(drop=True)
-	tabla_test = tabla[tabla["es_test"]].copy().reset_index(drop=True)
-	tabla_cv = tabla[~tabla["es_test"]].copy().reset_index(drop=True)
-	if tabla_cv.empty:
-		raise ValueError("No hay muestras para cross validation tras separar el test ds005892")
-	return tabla_cv, tabla_test
-
-
-def _seleccionar_combinaciones_aleatorias() -> list[tuple]:
-	full_grid = list(
-		product(
-			LEARNING_RATE_LIST,
-			DROPOUT_LIST,
-			HIDDEN_DIM_LIST,
-			K_VECINOS_LIST,
-			EPOCHS_LIST,
-			PACIENCIA_LIST,
-			DECAY_LIST,
-			BATCH_SIZE_LIST,
+def _seleccionar_combinaciones_grid() -> list[tuple]:
+	# Random search: 100 combinaciones aleatorias en lugar de todas las posibles
+	rng = np.random.RandomState(SEMILLA)
+	combinaciones = []
+	for _ in range(ALEATORIOS_COMBINACIONES):
+		combo = (
+			float(rng.choice(LEARNING_RATE_LIST)),
+			float(rng.choice(DROPOUT_LIST)),
+			int(rng.choice(HIDDEN_DIM_LIST)),
+			int(rng.choice(K_VECINOS_LIST)),
+			int(rng.choice(EPOCHS_LIST)),
+			int(rng.choice(PACIENCIA_LIST)),
+			float(rng.choice(DECAY_LIST)),
+			int(rng.choice(BATCH_SIZE_LIST)),
 		)
-	)
-
-	rng = random.Random(SEMILLA)
-	if len(full_grid) <= N_RANDOM_TRIALS:
-		return full_grid
-	return rng.sample(full_grid, N_RANDOM_TRIALS)
+		combinaciones.append(combo)
+	return combinaciones
 
 
 def _crear_modelo(num_features_entrada: int, hidden_dim: int, dropout: float) -> RedGCNBinaria:
@@ -323,14 +314,34 @@ def main() -> None:
 	print("Resumen tras balanceo:")
 	_imprimir_resumen_clases("  Total balanceado", tabla_116)
 
-	tabla_cv, tabla_test = _separar_test_y_cv(tabla_116)
+	tabla_train, tabla_eval, tabla_test = dividir_dataset(tabla_116, semilla=SEMILLA)
+	print("Resumen de split train/eval/test:")
+	_imprimir_resumen_clases("  Train", tabla_train)
+	_imprimir_resumen_clases("  Eval", tabla_eval)
+	_imprimir_resumen_clases("  Test", tabla_test)
+
+	print("Reparto de datasets en Train/Eval/Test:")
+	for clase in ["control", "patient"]:
+		print(f" {clase.capitalize()}:")
+		for split_name, tabla in [("Train", tabla_train), ("Eval", tabla_eval), ("Test", tabla_test)]:
+			sub_tabla = tabla[tabla["clase"] == clase]
+			conteo_por_dataset = sub_tabla["dataset_origen"].value_counts().to_dict()
+			print(f"  {split_name}: {conteo_por_dataset}")
+
+	print("Primeras muestras de train:")
+	display(tabla_train.head())
+
+	print("Primeras muestras de test:")
+	display(tabla_test.head())
+
+	tabla_cv = pd.concat([tabla_train, tabla_eval], ignore_index=True)
 	print("Resumen para cross validation (sin test ds005892):")
 	_imprimir_resumen_clases("  CV base", tabla_cv)
 	print("Resumen de test reservado (ds005892):")
 	_imprimir_resumen_clases("  Test", tabla_test)
 
-	combinaciones = _seleccionar_combinaciones_aleatorias()
-	print(f"Total de combinaciones aleatorias a probar: {len(combinaciones)}")
+	combinaciones = _seleccionar_combinaciones_grid()
+	print(f"Total de combinaciones de grid search a probar: {len(combinaciones)}")
 	print()
 
 	resultados_previos = []
