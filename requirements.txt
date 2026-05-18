@@ -1,0 +1,11 @@
+numpy==1.22
+pandas>=1.1.5
+mne==1.2
+networkx>=2.5
+plotly==6.3.0
+kaleido==1.2.0
+scipy>=1.1.0
+scot==0.2.1
+numba~=0.56.0
+antropy>=0.1.4
+nibabel==5.2.1
